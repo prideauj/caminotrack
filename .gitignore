@@ -38,3 +38,5 @@ htmlcov/
 
 # Logs
 *.log
+
+secrets.txt
