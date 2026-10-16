@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CaminoTrack - Your Camino Journey Tracker</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%238B4513' width='100' height='100'/%3E%3C!-- Staff --%3E%3Cline x1='70' y1='20' x2='75' y2='70' stroke='%23D2B48C' stroke-width='3' stroke-linecap='round'/%3E%3Ccircle cx='75' cy='18' r='4' fill='%23D4AF37'/%3E%3C!-- Head --%3E%3Ccircle cx='30' cy='25' r='8' fill='%23F4A460'/%3E%3C!-- Hat --%3E%3Cpath d='M 20 22 Q 20 15 30 14 Q 40 15 40 22' fill='%23333'/%3E%3C!-- Body --%3E%3Crect x='26' y='34' width='8' height='16' fill='%23D2691E'/%3E%3C!-- Scallop Shell on back --%3E%3Cpath d='M 22 38 Q 18 36 18 42 Q 18 48 22 46 Q 26 48 26 42 Q 26 36 22 38' fill='%23FFD700' stroke='%23DAA520' stroke-width='1'/%3E%3C!-- Left arm (holding staff) --%3E%3Cline x1='26' y1='38' x2='15' y2='45' stroke='%23F4A460' stroke-width='2' stroke-linecap='round'/%3E%3C!-- Right arm --%3E%3Cline x1='34' y1='38' x2='40' y2='42' stroke='%23F4A460' stroke-width='2' stroke-linecap='round'/%3E%3C!-- Left leg --%3E%3Cline x1='28' y1='50' x2='26' y2='65' stroke='%23333' stroke-width='2' stroke-linecap='round'/%3E%3C!-- Right leg --%3E%3Cline x1='32' y1='50' x2='34' y2='65' stroke='%23333' stroke-width='2' stroke-linecap='round'/%3E%3C!-- Left boot --%3E%3Crect x='24' y='65' width='4' height='4' fill='%23333' rx='1'/%3E%3C!-- Right boot --%3E%3Crect x='32' y='65' width='4' height='4' fill='%23333' rx='1'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #8B4513;
+            --secondary: #D2691E;
+            --success: #4CAF50;
+            --warning: #FFC107;
+            --danger: #f44336;
+            --light: #f5f5f5;
+            --dark: #333;
+            --border: #ddd;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: var(--light);
+            color: var(--dark);
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            color: white;
+            padding: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            display: inline-block;
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        button {
+            background: var(--secondary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: var(--primary);
+        }
+
+        button.logout {
+            background: var(--danger);
+        }
+
+        button.logout:hover {
+            background: #d32f2f;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+
+        .login-screen {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+        }
+
+        .login-box {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            max-width: 400px;
+            width: 90%;
+        }
+
+        .login-box h1 {
+            color: var(--primary);
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.3rem;
+            font-weight: 500;
+            color: var(--dark);
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 0.7rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(139, 69, 19, 0.1);
+        }
+
+        .google-login {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            background: #f5f5f5;
+            border: 1px solid var(--border);
+            color: var(--dark);
+            padding: 0.7rem;
+            margin-top: 1rem;
+            text-decoration: none;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            text-align: center;
+        }
+
+        .google-login:hover {
+            background: #efefef;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1rem;
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 1rem;
+            cursor: pointer;
+            background: none;
+            border: none;
+            font-size: 1rem;
+            color: var(--dark);
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+
+        .tab.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        .tab:hover {
+            color: var(--secondary);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--primary);
+        }
+
+        .stat-card .label {
+            color: #999;
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+
+        .date-view {
+            display: grid;
+            gap: 1rem;
+        }
+
+        .date-item {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-left: 4px solid var(--primary);
+        }
+
+        .date-item.completed {
+            border-left-color: var(--success);
+        }
+
+        .date-item .date {
+            font-weight: bold;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .date-item .distance {
+            font-size: 1.5rem;
+            color: var(--dark);
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 30px;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border);
+        }
+
+        .timeline-item {
+            margin-bottom: 2rem;
+            position: relative;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -34px;
+            top: 0;
+            width: 10px;
+            height: 10px;
+            background: var(--primary);
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 0 0 2px var(--primary);
+        }
+
+        .timeline-item.completed::before {
+            background: var(--success);
+            box-shadow: 0 0 0 2px var(--success);
+        }
+
+        .timeline-item-content {
+            background: white;
+            padding: 1rem;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .timeline-item .stage-name {
+            font-weight: bold;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .timeline-item .hotels {
+            font-size: 0.9rem;
+            color: #666;
+            margin: 0.5rem 0;
+        }
+
+        .timeline-item .distance {
+            color: var(--secondary);
+            font-weight: 500;
+        }
+
+        #map {
+            height: 500px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 1rem;
+        }
+
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            #map {
+                height: 300px;
+            }
+
+            header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .nav-buttons {
+                width: 100%;
+            }
+
+            .tabs {
+                font-size: 0.9rem;
+            }
+
+            .tab {
+                padding: 0.7rem 0.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stat-card .value {
+                font-size: 1.5rem;
+            }
+
+            .login-box {
+                padding: 1rem;
+            }
+
+            .date-item {
+                padding: 1rem;
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Login Screen -->
+        <div id="loginScreen" class="login-screen">
+            <div class="login-box">
+                <h1>🥾 CaminoTrack</h1>
+                <p style="text-align: center; color: #666; margin-bottom: 1.5rem;">
+                    Track your Camino de Santiago journey
+                </p>
+
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="sessionId">Your Session ID</label>
+                        <input type="text" id="sessionId" required placeholder="Enter a session ID (e.g., your name)">
+                        <small style="color: #999;">This keeps your data separate (local storage only)</small>
+                    </div>
+                    <button type="submit" style="width: 100%;">Start Tracking</button>
+                </form>
+
+                <p style="font-size: 0.8rem; color: #999; margin-top: 1.5rem; text-align: center;">
+                    When you sync, you'll be asked for your CaminoWays login credentials.<br>
+                    Data is stored locally in your browser.
+                </p>
+            </div>
+        </div>
+
+        <!-- Main App -->
+        <div id="mainApp" class="hidden">
+            <header>
+                <div class="logo">
+                    <svg class="logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                        <rect fill="#8B4513" width="100" height="100"/>
+                        <!-- Staff -->
+                        <line x1="70" y1="20" x2="75" y2="70" stroke="#D2B48C" stroke-width="3" stroke-linecap="round"/>
+                        <circle cx="75" cy="18" r="4" fill="#D4AF37"/>
+                        <!-- Head -->
+                        <circle cx="30" cy="25" r="8" fill="#F4A460"/>
+                        <!-- Hat -->
+                        <path d="M 20 22 Q 20 15 30 14 Q 40 15 40 22" fill="#fff"/>
+                        <!-- Body -->
+                        <rect x="26" y="34" width="8" height="16" fill="#D2691E"/>
+                        <!-- Scallop Shell on back -->
+                        <path d="M 22 38 Q 18 36 18 42 Q 18 48 22 46 Q 26 48 26 42 Q 26 36 22 38" fill="#FFD700" stroke="#DAA520" stroke-width="1"/>
+                        <!-- Left arm (holding staff) -->
+                        <line x1="26" y1="38" x2="15" y2="45" stroke="#F4A460" stroke-width="2" stroke-linecap="round"/>
+                        <!-- Right arm -->
+                        <line x1="34" y1="38" x2="40" y2="42" stroke="#F4A460" stroke-width="2" stroke-linecap="round"/>
+                        <!-- Left leg -->
+                        <line x1="28" y1="50" x2="26" y2="65" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                        <!-- Right leg -->
+                        <line x1="32" y1="50" x2="34" y2="65" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                        <!-- Left boot -->
+                        <rect x="24" y="65" width="4" height="4" fill="#333" rx="1"/>
+                        <!-- Right boot -->
+                        <rect x="32" y="65" width="4" height="4" fill="#333" rx="1"/>
+                    </svg>
+                    CaminoTrack
+                </div>
+                <div class="nav-buttons">
+                    <button id="syncBtn">↻ Sync Data</button>
+                    <button id="logoutBtn" class="logout">Logout</button>
+                </div>
+            </header>
+
+            <div class="container">
+                <!-- Stats -->
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="value" id="totalStages">-</div>
+                        <div class="label">Total Stages</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="value" id="completedStages">-</div>
+                        <div class="label">Completed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="value" id="totalDistance">-</div>
+                        <div class="label">Distance Walked</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="value" id="remainingDistance">-</div>
+                        <div class="label">Remaining</div>
+                    </div>
+                </div>
+
+                <!-- Tabs -->
+                <div class="tabs">
+                    <button class="tab active" data-tab="map">🗺️ Map</button>
+                    <button class="tab" data-tab="timeline">📅 Timeline</button>
+                </div>
+
+                <!-- Map View -->
+                <div id="mapTab" class="tab-content">
+                    <div id="map"></div>
+                </div>
+
+                <!-- Timeline View -->
+                <div id="timelineTab" class="tab-content hidden">
+                    <div class="timeline" id="timelineContainer"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
