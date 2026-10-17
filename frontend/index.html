@@ -374,36 +374,123 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* ---- Itinerary: trips | stages | details ---- */
+        .mail {
+            display: grid;
+            grid-template-columns: 270px 330px minmax(0, 1fr);
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            height: calc(100vh - 270px);
+            min-height: 520px;
+        }
+
+        .pane { overflow-y: auto; border-right: 1px solid var(--border); background: white; }
+        .pane:last-child { border-right: none; }
+
+        .pane-head {
+            position: sticky; top: 0; z-index: 2;
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.7rem 1rem;
+            background: #faf6f1;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600; color: var(--primary);
+        }
+
+        .back-btn { display: none; background: none; color: var(--primary); padding: 0.2rem 0.4rem; font-weight: 600; }
+        .back-btn:hover { background: #f0e6dc; }
+
+        .list-item {
+            padding: 0.8rem 1rem;
+            border-bottom: 1px solid #eee;
+            border-left: 4px solid transparent;
+            cursor: pointer;
+        }
+        .list-item:hover { background: #fdf8f3; }
+        .list-item:focus-visible { outline: 2px solid var(--secondary); outline-offset: -2px; }
+        .list-item.selected { background: #fbeee0; border-left-color: var(--secondary); }
+
+        .item-row { display: flex; justify-content: space-between; gap: 0.5rem; }
+        .item-title { font-weight: 600; }
+        .item-sub { font-size: 0.8rem; color: #777; margin-top: 0.1rem; }
+        .item-meta { font-size: 0.85rem; color: #555; margin-top: 0.35rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+        .progress { height: 4px; background: #eee; border-radius: 2px; margin-top: 0.5rem; overflow: hidden; }
+        .progress > div { height: 100%; }
+
+        .badge { color: white; padding: 0.1rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+
+        .detail-body { padding: 1rem 1.25rem 2rem; }
+        .detail-body h2 { color: var(--primary); font-size: 1.3rem; }
+        .detail-sub { color: #777; font-size: 0.9rem; margin: 0.2rem 0 1rem; }
+
+        .segmented { display: inline-flex; border: 1px solid var(--secondary); border-radius: 6px; overflow: hidden; margin-bottom: 1rem; }
+        .segmented button { background: white; color: var(--secondary); border-radius: 0; padding: 0.4rem 1rem; }
+        .segmented button:hover { background: #fbeee0; }
+        .segmented button.active { background: var(--secondary); color: white; }
+        .segmented.small { margin-bottom: 0; }
+        .segmented.small button { padding: 0.25rem 0.7rem; font-size: 0.85rem; }
+
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 0.6rem; margin-bottom: 1rem; }
+        .metric { background: #faf6f1; border-radius: 6px; padding: 0.6rem 0.8rem; }
+        .metric-value { font-size: 1.15rem; font-weight: 700; color: var(--primary); }
+        .metric-label { font-size: 0.75rem; color: #777; text-transform: uppercase; letter-spacing: 0.03em; }
+
+        #detailContent section { margin-top: 1.25rem; }
+        #detailContent h4 { margin-bottom: 0.4rem; color: var(--dark); }
+        #detailContent p { line-height: 1.5; margin-bottom: 0.5rem; }
+        .small { font-size: 0.8rem; color: #888; }
+        .muted { color: #888; }
+        .nowrap { white-space: nowrap; }
+        .note-box { background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; padding: 0.8rem 1rem; font-size: 0.9rem; }
+
+        .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+        .chip { background: #f3ece4; border-radius: 14px; padding: 0.2rem 0.7rem; font-size: 0.85rem; }
+        .chip small { color: #888; }
+
+        .lunch-list { display: grid; gap: 0.6rem; }
+        .lunch { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; }
+
+        .hotels { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.8rem; }
+        .hotel { border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; font-size: 0.9rem; display: grid; gap: 0.25rem; }
+        .hotel-label { font-size: 0.75rem; text-transform: uppercase; color: #888; letter-spacing: 0.04em; }
+        .hotel-name { font-weight: 600; }
+        .hotel a, .rv-body a { color: var(--primary); }
+
+        .empty-state { text-align: center; color: #888; padding: 3rem 1rem; background: white; border-radius: 8px; border: 1px solid var(--border); }
+
+        /* ---- Route view (map / height) ---- */
+        .rv { margin-bottom: 0.5rem; }
+        .rv-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
+        .rv-locate { background: white; color: #1976d2; border: 1px solid #1976d2; padding: 0.25rem 0.7rem; font-size: 0.85rem; }
+        .rv-locate:hover { background: #e3f2fd; }
+        .rv-note { font-size: 0.85rem; color: #1976d2; margin-bottom: 0.4rem; }
+        .rv-body { position: relative; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #fafafa; }
+        .rv-map, .rv-chart { position: absolute; inset: 0; }
+        .rv-chart { padding: 0.5rem; background: white; }
+        .rv-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #888; }
+
+        .map-toolbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.7rem; flex-wrap: wrap; }
+        .map-toolbar h3 { color: var(--primary); flex: 1; min-width: 160px; }
+        .map-toolbar select { padding: 0.4rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; background: white; }
+
+        /* Narrow screens: one column at a time, with back buttons */
+        @media (max-width: 900px) {
+            .mail { grid-template-columns: 1fr; height: calc(100vh - 220px); }
+            .mail .pane { display: none; border-right: none; }
+            .mail[data-pane="trips"] #tripsPane,
+            .mail[data-pane="stages"] #stagesPane,
+            .mail[data-pane="detail"] #detailPane { display: block; }
+            .back-btn { display: inline-block; }
+            #tripsPane .back-btn { display: none; }
+        }
     </style>
 </head>
 <body>
     <div id="app">
-        <!-- Login Screen -->
-        <div id="loginScreen" class="login-screen">
-            <div class="login-box">
-                <h1>🥾 CaminoTrack</h1>
-                <p style="text-align: center; color: #666; margin-bottom: 1.5rem;">
-                    Track your Camino de Santiago journey
-                </p>
-
-                <form id="loginForm">
-                    <div class="form-group">
-                        <label for="sessionId">Your Session ID</label>
-                        <input type="text" id="sessionId" required placeholder="Enter a session ID (e.g., your name)">
-                        <small style="color: #999;">This keeps your data separate (local storage only)</small>
-                    </div>
-                    <button type="submit" style="width: 100%;">Start Tracking</button>
-                </form>
-
-                <p style="font-size: 0.8rem; color: #999; margin-top: 1.5rem; text-align: center;">
-                    When you sync, you'll be asked for your CaminoWays login credentials.<br>
-                    Data is stored locally in your browser.
-                </p>
-            </div>
-        </div>
-
         <!-- Main App -->
-        <div id="mainApp" class="hidden">
+        <div id="mainApp">
             <header>
                 <div class="logo">
                     <svg class="logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -436,7 +523,7 @@
                 </div>
                 <div class="nav-buttons">
                     <button id="syncBtn">↻ Sync Data</button>
-                    <button id="logoutBtn" class="logout">Logout</button>
+                    <button id="logoutBtn" class="logout">Clear data</button>
                 </div>
             </header>
 
@@ -463,25 +550,40 @@
 
                 <!-- Tabs -->
                 <div class="tabs">
-                    <button class="tab active" data-tab="map">🗺️ Map</button>
-                    <button class="tab" data-tab="timeline">📅 Timeline</button>
+                    <button class="tab active" data-tab="itinerary">📅 Itinerary</button>
+                    <button class="tab" data-tab="map">🗺️ Map</button>
                 </div>
 
-                <!-- Map View -->
-                <div id="mapTab" class="tab-content">
-                    <div id="map"></div>
+                <!-- Itinerary: trips | stages | details -->
+                <div id="itineraryTab" class="tab-content">
+                    <div id="emptyState" class="empty-state hidden">
+                        <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">No trips yet</p>
+                        <p>Press <strong>Sync Data</strong> to import your CaminoWays bookings.</p>
+                    </div>
+                    <div id="mail" class="mail hidden" data-pane="trips">
+                        <div id="tripsPane" class="pane"></div>
+                        <div id="stagesPane" class="pane"></div>
+                        <div id="detailPane" class="pane"></div>
+                    </div>
                 </div>
 
-                <!-- Timeline View -->
-                <div id="timelineTab" class="tab-content hidden">
-                    <div class="timeline" id="timelineContainer"></div>
+                <!-- Map: route or height profile of the selected trip / stage -->
+                <div id="mapTab" class="tab-content hidden">
+                    <div class="map-toolbar">
+                        <h3 id="mapTitle"></h3>
+                        <select id="mapScope" aria-label="What to show">
+                            <option value="trip">Whole trip</option>
+                            <option value="stage">Selected stage</option>
+                        </select>
+                    </div>
+                    <div id="mapRoute"></div>
                 </div>
             </div>
         </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

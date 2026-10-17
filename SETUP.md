@@ -17,23 +17,18 @@ Double-click `run.bat` to start the server at `http://localhost:8000`
 ## Testing the App
 
 Once running:
-1. **Create a Session**: Enter any session ID (e.g., your name) - this keeps your data local
-2. **Sync Your Data**: Click "Sync Data" and enter your CaminoWays login credentials
-3. **Browse Your Trips** in three views:
+1. **Sync Your Data**: Click "Sync Data" and enter your CaminoWays email and password
+2. **Browse Your Trips** in two views:
    - **Map**: Interactive map with color-coded stages (green=completed, yellow=upcoming)
-   - **Timeline**: Chronological list of stages, hotels, and actual walking distances
-   - **By Date**: Daily distance summaries
+   - **Timeline**: Trips and their stages, with distance, climb, difficulty, hotels, lunch stops and a route summary (click a stage)
 
 ## Key Features
 
-✅ **Actual Distance Calculation**: 
-- Calculates real walking distance from hotel to hotel using GPS coordinates
-- Compares to standard stage distances
-- Shows warning if hotels are significantly off the route
+✅ **Route Data**: Ascent, descent and difficulty for each stage (Camino Francés and Via Francigena in Tuscany), from OpenStreetMap and open elevation data
 
 ✅ **Mobile Responsive**: Works on desktop and mobile devices
 
-✅ **Local Data**: All data is stored locally in your browser (using browser storage)
+✅ **Local Data**: Nothing is stored on the server. Your trips are saved in your browser only
 
 ## Troubleshooting
 
@@ -52,6 +47,6 @@ Once running:
 **Port 8000 already in use**
 - Change port in `main.py`: `uvicorn.run(app, host="0.0.0.0", port=8001)`
 
-## Next: Deploy to Render
+## Hosting
 
-Once you've tested locally, see `README.md` for Render deployment instructions.
+See `README.md`.

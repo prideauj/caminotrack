@@ -1,128 +1,61 @@
-# CaminoTrack - Track Your Camino de Santiago
+# CaminoTrack
 
-A Python web app to track your Camino de Santiago journey with beautiful visualizations, maps, and timelines.
+Import your CaminoWays bookings and see each walking day with its distance, climb, difficulty, lunch stops and a short route summary.
 
-## Features
+## How it works
 
-- 🗺️ **Interactive Map** - See your route with color-coded stages (completed vs. upcoming)
-- 📅 **Timeline View** - All stages and hotels in chronological order
-- 📊 **Date-based Stats** - Total distance by walking date
-- 🏨 **Hotel Tracking** - See all accommodations along your journey
-- 📱 **Mobile Responsive** - Works perfectly on desktop and mobile
-- 🔐 **Secure Auth** - Google OAuth or email/password login
-- 🔄 **Data Sync** - Automatically sync with your CaminoWays account
+- **Sync** logs in to CaminoWays with your email and password, reads your bookings and turns each trip into one stage per walking day (dates, distances, hotels, day descriptions).
+- **Route data** (ascent, descent, difficulty, villages passed, lunch stops) comes from public sources: OpenStreetMap route lines and food places, and open elevation data. See `route_data.py`.
+- **Nothing is stored on the server.** Your login is used for that one request and never stored or logged. The stages are saved in your browser (`localStorage`) and the server returns them as JSON. "Clear data" removes them.
 
-## Setup
+## Run locally
 
-### 1. Clone and Install Dependencies
+On Windows, double-click `setup.bat` once, then `run.bat`, and open http://localhost:8000.
+
+Elsewhere:
 
 ```bash
-cd caminotrack
-pip install -r requirements.txt
+python -m venv venv
+venv/bin/pip install -r requirements.txt
+venv/bin/python main.py
 ```
 
-### 2. Set Up Google OAuth
+## Route data
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable OAuth 2.0
-4. Create OAuth 2.0 credentials (Web application)
-5. Add redirect URIs:
-   - `http://localhost:8000/auth/callback` (local)
-   - `https://your-app.render.com/auth/callback` (production)
-
-### 3. Configure Environment
+Route profiles live in `route_data.json` (committed, so the app needs no network access to known towns). Routes covered: **Camino Francés** and **Via Francigena (Tuscany, Lucca to Siena)**. A trip on another route syncs fine but has no climb or difficulty data.
 
 ```bash
-cp .env.example .env
+python route_data.py status           # what's built and what's left
+python route_data.py build            # build whatever is missing (needs internet)
+python route_data.py build via-francigena-tuscany
+python route_data.py rebuild camino-frances    # start one route again from scratch
+python route_data.py pois             # refresh only food places and villages
+python route_data.py check "Najera" "Burgos"   # where towns land on each route
 ```
 
-Edit `.env` and add your Google OAuth credentials:
-```
-GOOGLE_CLIENT_ID=your_id
-GOOGLE_CLIENT_SECRET=your_secret
-REDIRECT_URI=http://localhost:8000/auth/callback
-```
+The build works in small steps (one stretch between two towns at a time) and keeps its progress in `leg_cache/`, `overpass_cache/` and `elevation_cache.json` (all gitignored). If it's stopped, just run `build` again and it carries on where it left off.
 
-### 4. Run Locally
+How the numbers are worked out:
+- **Ascent / descent**: elevation sampled every 150 m along the route (EU-DEM 25 m via OpenTopoData, Open-Meteo as fallback), lightly smoothed, ignoring wiggles under 8 m. Treat as approximate; it tends to read a little low.
+- **Effort**: distance + 1 km per 100 m climbed + 1 km per 300 m descended (flat-km equivalents).
+- **Difficulty**: where a stage's effort ranks among every same-length stretch of the whole route (Easy / Moderate / Hard / Very hard), plus how it compares with the trip's average day.
+- **Lunch stops**: named restaurants, cafés, bars, bakeries and shops within about 350 m of the route, nearest the middle of the stage first. OpenStreetMap data is patchy, so check opening times.
 
-```bash
-python main.py
-```
+## Hosting
 
-Open http://localhost:8000 in your browser.
+The app is stateless, so any host that runs a Python web service works (Render, Cloud Run, ...):
 
-## Data Structure
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Build command: `pip install -r requirements.txt`
+- No environment variables or database needed. `/healthz` is available for uptime checks.
+- Sync is limited to 5 attempts per 10 minutes per IP.
 
-The app scrapes the following data from your CaminoWays account:
-
-- **Stage Name** - e.g., "Burgos to Hornillo de Camino"
-- **Distance** - Standard distance and actual distance walked
-- **Hotels** - Start and end accommodations
-- **Date** - When you walked the stage
-- **Route** - GeoJSON of the actual walking path (to be fetched from OpenRouteService)
-
-## Deployment on Render
-
-### 1. Create Render Account and Project
-
-Visit [render.com](https://render.com) and create a new Web Service.
-
-### 2. Connect GitHub Repository
-
-- Connect your GitHub repo to Render
-- Set build command: `pip install -r requirements.txt`
-- Set start command: `python main.py`
-
-### 3. Set Environment Variables
-
-In Render dashboard, add:
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `REDIRECT_URI=https://your-app.render.com/auth/callback`
-
-### 4. Deploy
-
-Push to your repository and Render will automatically deploy.
-
-## Sharing with Your Wife
-
-Simply share the URL of your deployed app. You can both log in with your own accounts or share credentials securely.
-
-## Next Steps
-
-1. **Refine the scraper** - Once we see the actual page structure, we'll update `scraper.py` with correct selectors
-2. **Add route geometry** - Integrate OpenRouteService or similar to get actual walking routes
-3. **Add photos** - Support stage photos from your journey
-4. **Statistics** - Add elevation gain, pace calculations, etc.
-
-## Architecture
+## Project layout
 
 ```
-FastAPI Backend
-├── Google OAuth
-├── Web Scraper (Playwright)
-└── SQLite Database
-
-Vanilla JS + Leaflet Frontend
-├── Map View
-├── Timeline
-└── Date Stats
+main.py         FastAPI app: serves the page, POST /api/sync
+scraper.py      CaminoWays login + booking page parsing (httpx, BeautifulSoup)
+route_data.py   Route profiles, difficulty, lunch stops (build + lookup)
+models.py       Stage model
+frontend/       Vanilla JS + Leaflet
 ```
-
-## Technologies
-
-- **Backend**: FastAPI, Playwright, SQLite
-- **Frontend**: HTML, CSS, JavaScript (Leaflet.js)
-- **Hosting**: Render.com
-- **Authentication**: Google OAuth 2.0
-
-## Notes
-
-- Password prompting for sync uses a simple `prompt()` - improve with secure credential storage in production
-- Database is SQLite (works on Render but data persists only during active session - consider PostgreSQL for production)
-- Route geometry currently uses placeholder markers - integrate actual GPS data
-
----
-
-Happy trails! 🥾

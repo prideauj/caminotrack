@@ -1,215 +1,91 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import logging
 import os
-from dotenv import load_dotenv
-import httpx
-from datetime import datetime, date
-import json
+import time
+from collections import defaultdict, deque
 from pathlib import Path
-import aiosqlite
-from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from scraper import CaminoScraper, LoginError
+from route_data import enrich_stages
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
-# Google OAuth config
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
+BASE_DIR = Path(__file__).parent
 
-from scraper import CaminoScraper
-from models import Stage, Hotel
+# The server keeps no user data: a sync scrapes CaminoWays, adds route data and returns everything to the
+# browser, which stores it. Credentials are used for that one request and never stored or logged.
 
-# Database setup
-DB_PATH = "caminotrack.db"
+SYNCS_PER_WINDOW = 5          # per client IP
+WINDOW_SECONDS = 600
+MAX_CONCURRENT_SYNCS = 3      # keeps memory use bounded on small free-tier hosts
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT,
-                name TEXT,
-                access_token TEXT,
-                refresh_token TEXT,
-                created_at TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS stages (
-                id TEXT PRIMARY KEY,
-                user_id TEXT,
-                trip_name TEXT,
-                name TEXT,
-                start_location TEXT,
-                end_location TEXT,
-                start_hotel TEXT,
-                end_hotel TEXT,
-                start_hotel_lat REAL,
-                start_hotel_lon REAL,
-                end_hotel_lat REAL,
-                end_hotel_lon REAL,
-                standard_distance REAL,
-                actual_distance REAL,
-                date_walked DATE,
-                is_completed BOOLEAN,
-                route_geojson TEXT,
-                created_at TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-        """)
-        await db.commit()
+app = FastAPI()
+app.mount("/static", StaticFiles(directory=BASE_DIR / "frontend"), name="static")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    yield
+_recent_syncs = defaultdict(deque)
+_sync_slots = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
-app = FastAPI(lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class SyncRequest(BaseModel):
+    email: str
+    password: str
 
-# Mount static files
-Path("frontend").mkdir(exist_ok=True)
-if Path("frontend").exists():
-    app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+def _client_ip(request: Request) -> str:
+    # Hosts like Render and Cloud Run put the real client address in X-Forwarded-For
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else "unknown")
+
+
+def _check_rate_limit(ip: str):
+    now = time.monotonic()
+    attempts = _recent_syncs[ip]
+    while attempts and now - attempts[0] > WINDOW_SECONDS:
+        attempts.popleft()
+    if len(attempts) >= SYNCS_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many sync attempts. Please wait a few minutes and try again.")
+    attempts.append(now)
+
 
 @app.get("/")
 async def serve_root():
-    return FileResponse("frontend/index.html")
+    return FileResponse(BASE_DIR / "frontend" / "index.html")
 
-@app.post("/scrape/{user_id}")
-async def scrape_caminoways(user_id: str, request: Request):
-    """Scrape stages from caminoways.com"""
-    data = await request.json()
-    email = data.get("email")
-    password = data.get("password")
 
-    scraper = CaminoScraper()
-    try:
-        stages = await scraper.scrape_stages(email, password)
+@app.get("/healthz")
+async def health():
+    return {"ok": True}
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            for stage in stages:
-                await db.execute("""
-                    INSERT OR REPLACE INTO stages
-                    (id, user_id, trip_name, name, start_location, end_location,
-                     start_hotel, end_hotel, start_hotel_lat, start_hotel_lon,
-                     end_hotel_lat, end_hotel_lon, standard_distance, actual_distance,
-                     date_walked, is_completed, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    f"{user_id}_{stage.name}",
-                    user_id,
-                    stage.trip_name,
-                    stage.name,
-                    stage.start_location,
-                    stage.end_location,
-                    stage.start_hotel,
-                    stage.end_hotel,
-                    stage.start_hotel_lat,
-                    stage.start_hotel_lon,
-                    stage.end_hotel_lat,
-                    stage.end_hotel_lon,
-                    stage.standard_distance,
-                    stage.actual_distance,
-                    stage.date_walked,
-                    stage.is_completed,
-                    datetime.now()
-                ))
-            await db.commit()
 
-        return {"success": True, "stages_imported": len(stages)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/api/sync")
+async def sync(body: SyncRequest, request: Request):
+    """Scrape the user's CaminoWays bookings and return their stages, enriched with route data"""
+    _check_rate_limit(_client_ip(request))
 
-@app.get("/api/stages/{user_id}")
-async def get_stages(user_id: str):
-    """Get all stages for a user"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM stages WHERE user_id = ? ORDER BY date_walked",
-            (user_id,)
-        )
-        rows = await cursor.fetchall()
-        stages = [dict(row) for row in rows]
-    return stages
+    async with _sync_slots:
+        try:
+            stages = await CaminoScraper().scrape_stages(body.email, body.password)
+            # Route lookups can touch the network (geocoding unfamiliar towns), so keep them off the event loop
+            await asyncio.to_thread(enrich_stages, stages)
+        except LoginError as e:
+            raise HTTPException(status_code=401, detail=str(e))
+        except Exception:
+            logger.exception("Sync failed")
+            raise HTTPException(status_code=502, detail="Could not read your bookings from CaminoWays. Please try again later.")
 
-@app.get("/api/stages/{user_id}/stats")
-async def get_stats(user_id: str):
-    """Get stats (total distance, completion, etc.)"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT
-                COUNT(*) as total_stages,
-                SUM(CASE WHEN is_completed THEN 1 ELSE 0 END) as completed_stages,
-                SUM(CASE WHEN is_completed THEN actual_distance ELSE 0 END) as total_distance,
-                SUM(CASE WHEN NOT is_completed THEN actual_distance ELSE 0 END) as remaining_distance
-            FROM stages
-            WHERE user_id = ?
-        """, (user_id,))
-        row = await cursor.fetchone()
-        row = await cursor.fetchone()
+    return JSONResponse(
+        {"stages": [stage.model_dump(mode="json") for stage in stages]},
+        headers={"Cache-Control": "no-store"},
+    )
 
-    if row:
-        return {
-            "total_stages": row[0],
-            "completed_stages": row[1],
-            "total_distance": row[2] or 0,
-            "remaining_distance": row[3] or 0
-        }
-    return {
-        "total_stages": 0,
-        "completed_stages": 0,
-        "total_distance": 0,
-        "remaining_distance": 0
-    }
-
-@app.get("/api/stages/{user_id}/by-date")
-async def get_stages_by_date(user_id: str):
-    """Get stages grouped by date with total distance"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute("""
-            SELECT
-                date_walked,
-                COUNT(*) as stage_count,
-                SUM(actual_distance) as total_distance
-            FROM stages
-            WHERE user_id = ?
-            GROUP BY date_walked
-            ORDER BY date_walked DESC
-        """, (user_id,))
-        rows = await cursor.fetchall()
-        data = [dict(row) for row in rows]
-    return data
-
-@app.get("/api/stages/{user_id}/timeline")
-async def get_timeline(user_id: str):
-    """Get timeline view with hotels and services"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute("""
-            SELECT
-                id, trip_name, name, start_location, end_location,
-                start_hotel, end_hotel, standard_distance, actual_distance,
-                date_walked, is_completed
-            FROM stages
-            WHERE user_id = ?
-            ORDER BY date_walked
-        """, (user_id,))
-        rows = await cursor.fetchall()
-        timeline = [dict(row) for row in rows]
-    return timeline
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

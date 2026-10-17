@@ -1,4 +1,5 @@
-from playwright.async_api import async_playwright, Page
+import httpx
+from bs4 import BeautifulSoup
 from datetime import datetime, date
 from models import Stage
 from typing import List, Optional
@@ -8,218 +9,250 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DATE_RE = r"\d{1,2}\s+[A-Za-z]+\s+\d{4}"
+DATE_RANGE_RE = re.compile(rf"({DATE_RE})\s+To\s+({DATE_RE})")
+DISTANCE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*km", re.I)
+BOOKING_LINK_RE = re.compile(r"/booking/(\d+)")
+
+
+class LoginError(Exception):
+    pass
+
+
 class CaminoScraper:
     def __init__(self):
         self.base_url = "https://core.caminoways.com/client"
 
     async def scrape_stages(self, email: str, password: str) -> List[Stage]:
-        """Scrape stages from caminoways.com"""
-        stages = []
+        """Scrape one Stage per walking day from every booking on caminoways.com"""
+        stages: List[Stage] = []
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch()
-            page = await browser.new_page()
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers=headers) as client:
+            await self._login(client, email, password)
+            logger.info("Successfully logged in")
 
-            try:
-                await page.goto(self.base_url)
-                logger.info("Navigated to CaminoWays login")
+            response = await client.get(f"{self.base_url}/my-bookings")
+            response.raise_for_status()
+            booking_ids = sorted(set(BOOKING_LINK_RE.findall(response.text)))
+            logger.info(f"Found {len(booking_ids)} bookings to process")
 
-                await page.fill('input[type="email"]', email)
-                await page.fill('input[type="password"]', password)
-                await page.click('button[type="submit"]')
+            for idx, booking_id in enumerate(booking_ids):
+                try:
+                    logger.info(f"Processing booking {idx+1}/{len(booking_ids)}: {booking_id}")
+                    response = await client.get(f"{self.base_url}/booking/{booking_id}")
+                    response.raise_for_status()
 
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                logger.info("Successfully logged in")
-
-                await page.goto(f"{self.base_url}/my-bookings", wait_until="networkidle", timeout=20000)
-                logger.info("Navigated to my-bookings")
-
-                booking_links = []
-                link_elements = await page.locator('a[href*="/booking/"]').all()
-
-                for link in link_elements:
-                    href = await link.get_attribute('href')
-                    if href and '/booking/' in href:
-                        booking_links.append(href)
-
-                booking_links = list(set(booking_links))
-                logger.info(f"Found {len(booking_links)} bookings to process")
-
-                for idx, booking_link in enumerate(booking_links):
-                    try:
-                        logger.info(f"Processing booking {idx+1}/{len(booking_links)}: {booking_link}")
-                        await page.goto(booking_link, wait_until="networkidle", timeout=20000)
-
-                        trip_name = await self._extract_trip_name(page)
-                        booking_stages = await self._extract_stages_from_booking(page)
-
-                        for stage in booking_stages:
-                            stage.trip_name = trip_name
-
-                        stages.extend(booking_stages)
-                        logger.info(f"✓ Extracted {len(booking_stages)} stages for trip: {trip_name}")
-
-                    except Exception as e:
-                        logger.error(f"✗ Error processing booking: {e}", exc_info=True)
-                        continue
-
-            finally:
-                await browser.close()
+                    booking_stages = self.parse_booking_html(response.text, booking_id)
+                    stages.extend(booking_stages)
+                    trip_name = booking_stages[0].trip_name if booking_stages else "?"
+                    logger.info(f"✓ Extracted {len(booking_stages)} stages for trip: {trip_name}")
+                except Exception as e:
+                    logger.error(f"✗ Error processing booking {booking_id}: {e}", exc_info=True)
+                    continue
 
         logger.info(f"Total stages extracted: {len(stages)}")
         return stages
 
-    async def _extract_trip_name(self, page: Page) -> str:
-        """Extract the trip name from the booking page header"""
-        try:
-            # Look for the trip reference in the header (usually something like "CWX112354-JonPrideaux")
-            trip_ref = await page.locator(r'text=/CWX\d+-/').first.text_content()
-            if trip_ref:
-                return trip_ref.strip()
+    async def _login(self, client: httpx.AsyncClient, email: str, password: str):
+        """Log in through the Laravel form (CSRF token + session cookie)"""
+        response = await client.get(f"{self.base_url}/login")
+        response.raise_for_status()
+        token = re.search(r'name="_token"[^>]*value="([^"]+)"', response.text)
+        if not token:
+            raise LoginError("Could not find the login form's CSRF token")
 
-            # Fallback: try to get from heading
-            heading = await page.locator('h2').first.text_content()
-            if heading:
-                return heading.strip()
+        response = await client.post(f"{self.base_url}/login", data={
+            "_token": token.group(1),
+            "email": email,
+            "password": password,
+            "remember_me": "0",
+        })
+        response.raise_for_status()
 
-            return "Trip"
-        except:
-            return "Trip"
+        # A failed login redirects back to the login page with a validation message
+        if str(response.url).rstrip("/").endswith("/login"):
+            message = self._form_error(response.text)
+            raise LoginError(message or "Login failed - check your email and password")
 
-    async def _extract_stages_from_booking(self, page: Page) -> List[Stage]:
-        """Extract walking stages from a booking page"""
+    @staticmethod
+    def _form_error(html: str) -> Optional[str]:
+        soup = BeautifulSoup(html, "lxml")
+        error = soup.select_one(".invalid-feedback, .alert-danger, .text-danger:not(:empty)")
+        text = error.get_text(" ", strip=True) if error else ""
+        return text if len(text) > 1 else None
+
+    # ------------------------------------------------------------------
+    # Parsing (pure functions, no network)
+    # ------------------------------------------------------------------
+
+    def parse_booking_html(self, html: str, booking_id: str) -> List[Stage]:
+        """Turn a booking page into one Stage per walking day"""
+        soup = BeautifulSoup(html, "lxml")
+
+        trip_name = self._extract_trip_name(soup)
+        days = self._parse_itinerary(soup)
+        hotels = self._parse_hotels(soup)
+        logger.info(f"Found {len(days)} itinerary days and {len(hotels)} hotels")
+
         stages = []
-
-        try:
-            # Get the itinerary section text
-            itinerary_html = await page.locator('[id="itinerary"]').inner_html()
-
-            # Extract stage information from the itinerary
-            stage_list = self._parse_itinerary_html(itinerary_html)
-            logger.info(f"Found {len(stage_list)} potential stages in itinerary")
-
-            # Get services section for hotel and transfer details
-            services_html = await page.locator('[id="services"]').inner_html()
-            hotel_map = self._extract_hotels_from_services(services_html)
-            logger.info(f"Found {len(hotel_map)} hotels/services")
-
-            # Combine stage and hotel information
-            for i, stage_info in enumerate(stage_list):
-                stage = Stage(
-                    name=f"{stage_info['location']}",
-                    start_location=stage_info.get('prev_location') or '',
-                    end_location=stage_info['location'],
-                    start_hotel=hotel_map.get(i, {}).get('hotel', ''),
-                    end_hotel=hotel_map.get(i + 1, {}).get('hotel', ''),
-                    start_hotel_lat=None,
-                    start_hotel_lon=None,
-                    end_hotel_lat=None,
-                    end_hotel_lon=None,
-                    standard_distance=stage_info.get('distance', 0.0),
-                    actual_distance=stage_info.get('distance', 0.0),
-                    date_walked=stage_info['date'],
-                    is_completed=stage_info['date'] < date.today()
-                )
-                stages.append(stage)
-
-        except Exception as e:
-            logger.error(f"Error extracting stages: {e}", exc_info=True)
+        previous = None  # the day we woke up in, i.e. the previous night's stop
+        for day in days:
+            if previous is not None and day["distance"] > 0:
+                start_hotel = self._find_hotel(hotels, previous["location"], check_out=day["date"])
+                end_hotel = self._find_hotel(hotels, day["location"], check_in=day["date"])
+                stages.append(Stage(
+                    name=f"{previous['location']} to {day['location']}",
+                    trip_name=trip_name,
+                    booking_id=booking_id,
+                    start_location=previous["location"],
+                    end_location=day["location"],
+                    start_hotel=start_hotel["name"] if start_hotel else "",
+                    end_hotel=end_hotel["name"] if end_hotel else "",
+                    standard_distance=day["distance"],
+                    actual_distance=day["distance"],
+                    date_walked=day["date"],
+                    is_completed=day["date"] < date.today(),
+                    description=day["description"],
+                    caminoways={
+                        "service_level": day["service_level"],
+                        "nights": day["nights"],
+                        "included": day["included"],
+                        "start_hotel": self._hotel_details(start_hotel),
+                        "end_hotel": self._hotel_details(end_hotel),
+                    },
+                ))
+            # Entries with no distance (arrival night, transfers back) don't move us along the route,
+            # except for the very first entry which is where the walk starts
+            if previous is None or day["distance"] > 0:
+                previous = day
 
         return stages
 
-    def _parse_itinerary_html(self, html: str) -> List[dict]:
-        """Parse itinerary HTML to extract walking stages"""
-        stages = []
+    def _extract_trip_name(self, soup: BeautifulSoup) -> str:
+        """Build a name like 'Logrono to Burgos (Oct 2026)' from the 'From <date> (<town>) To <date> (<town>)' header"""
+        for heading in soup.find_all(["h1", "h2", "h3"]):
+            text = heading.get_text(" ", strip=True)
+            match = re.match(rf"From\s+({DATE_RE})\s+\((.+?)\)\s+To\s+({DATE_RE})\s+\((.+?)\)", text)
+            if match:
+                start = self._parse_date(match.group(1))
+                return f"{match.group(2)} to {match.group(4)} ({start.strftime('%b %Y')})"
+        return "Trip"
 
-        # Look for stage entries - they contain dates, locations, and distances
-        # Pattern: Date like "01 May 2025", location name, distance like "25km"
+    def _parse_itinerary(self, soup: BeautifulSoup) -> List[dict]:
+        itinerary = soup.find(id="itinerary")
+        if itinerary is None:
+            return []
 
-        # Find all text sections that look like stage entries
-        date_pattern = r'(\d{1,2}\s+\w+\s+\d{4})'
-        distance_pattern = r'(\d+(?:\.\d+)?)\s*km'
-
-        dates = re.findall(date_pattern, html)
-        distances = re.findall(distance_pattern, html)
-
-        # Extract location names - they appear near dates in the HTML
-        # Look for text between date and distance
-        stage_sections = re.split(r'<div class="section-card">', html)
-
-        location_pattern = r'<h\d[^>]*>([^<]+(?:(?!<h\d).)*?(?:\d+\s*km)?[^<]*)</h\d>'
-
-        prev_location = None
-        for section in stage_sections[1:]:  # Skip first empty split
-            # Get text content
-            text_content = re.sub(r'<[^>]+>', '', section)
-            lines = [line.strip() for line in text_content.split('\n') if line.strip()]
-
-            if len(lines) < 2:
+        days = []
+        for card in itinerary.select("div.section-card-itinerary-accordion"):
+            date_el = card.select_one(".itinerary-advanced-badge span")
+            location_el = card.select_one(".accordion-button .heading-4")
+            if not date_el or not location_el:
                 continue
 
-            # Extract date
-            date_match = re.search(date_pattern, text_content)
+            date_match = re.search(DATE_RE, date_el.get_text(" ", strip=True))
             if not date_match:
                 continue
 
-            date_str = date_match.group(1)
-            walked_date = self._parse_date(date_str)
-
-            # Extract location (usually first meaningful word after date removal)
-            location = None
-            for line in lines:
-                # Skip lines with common non-location keywords
-                if any(skip in line.lower() for skip in ['luggage', 'transfer', 'breakfast', 'dinner', 'service', 'note', 'included', 'pax']):
-                    continue
-                if len(line) > 2 and line[0].isupper():
-                    location = line.split('(')[0].strip()
-                    break
-
-            if not location:
-                location = lines[0]
-
-            # Extract distance
             distance = 0.0
-            distance_match = re.search(distance_pattern, text_content)
-            if distance_match:
-                distance = float(distance_match.group(1))
+            distance_el = card.select_one(".accordion-button .heading-5")
+            if distance_el:
+                distance_match = DISTANCE_RE.search(distance_el.get_text(" ", strip=True))
+                if distance_match:
+                    distance = float(distance_match.group(1).replace(",", "."))
 
-            # Only add if it has a distance (indicates a walking stage, not a transfer)
-            if distance > 0 and location:
-                stages.append({
-                    'location': location,
-                    'prev_location': prev_location,
-                    'distance': distance,
-                    'date': walked_date
-                })
-                prev_location = location
+            # Badges: one with text is the service level (ST / SU), the icon-only ones are inclusions
+            service_level, included = None, []
+            for badge in card.select(".accordion-service-badge"):
+                title = (badge.get("data-bs-title") or "").strip()
+                code = badge.get_text(strip=True)
+                if code:
+                    service_level = {"code": code, "name": title or code}
+                elif title:
+                    included.append(title)
 
-        return stages
+            nights_match = re.search(r"(\d+)\s+Nights?", card.select_one(".itinerary-advanced-badge").get_text(" ", strip=True))
 
-    def _extract_hotels_from_services(self, html: str) -> dict:
-        """Extract hotel information from services section"""
-        hotels = {}
+            description_el = card.select_one(".rte-content")
+            days.append({
+                "service_level": service_level,
+                "included": included,
+                "nights": int(nights_match.group(1)) if nights_match else None,
+                "date": self._parse_date(date_match.group(0)),
+                "location": location_el.get_text(" ", strip=True),
+                "distance": distance,
+                "description": description_el.get_text(" ", strip=True) if description_el else None,
+            })
+        return days
 
-        # Look for hotel headings and their dates
-        hotel_pattern = r'<h\d[^>]*>([^<]*(?:Hotel|Parador|Posada|Residencia|Inn|Casa)[^<]*)</h\d>'
-        hotels_found = re.findall(hotel_pattern, html, re.IGNORECASE)
+    def _parse_hotels(self, soup: BeautifulSoup) -> List[dict]:
+        """Accommodation entries from the services section: location, stay dates, hotel name and address"""
+        services = soup.find(id="services")
+        if services is None:
+            return []
 
-        # Also look for hotel names in general headings
-        if not hotels_found:
-            # Fallback: look for any heading that might be a hotel
-            hotel_pattern = r'<h\d[^>]*>([^<]{10,})</h\d>'
-            potential = re.findall(hotel_pattern, html)
-            # Filter for likely hotel names
-            hotels_found = [h for h in potential if not any(skip in h.lower() for skip in ['luggage', 'passenger', 'price', 'payment', 'itinerary'])][:10]
+        hotels = []
+        for label in services.find_all(string=re.compile(r"^\s*Location:\s*")):
+            # The smallest ancestor holding the stay dates, the hotel heading and the location
+            card = label.parent
+            while card is not None and not (card.find("h4") and DATE_RANGE_RE.search(card.get_text(" ", strip=True))):
+                card = card.parent
+            if card is None:
+                continue
 
-        for idx, hotel in enumerate(hotels_found):
-            hotels[idx] = {
-                'hotel': hotel.strip(),
-                'address': '',
-                'lat': None,
-                'lon': None
-            }
-
+            text = card.get_text(" ", strip=True)
+            dates = DATE_RANGE_RE.search(text)
+            location = re.search(r"Location:\s*(.+?)(?=\s+(?:Bed|Hotel|Room|See Hotel)|$)", text)
+            name = card.find("h4")
+            address = card.select_one(".icon-pin")
+            phone = card.select_one('a[href^="tel:"]')
+            map_link = next((a["href"] for a in card.find_all("a", href=True) if "Hotel On Map" in a.get_text()), None)
+            board = card.find("h3")
+            reservation = re.search(r"Reservation number:\s*(\S+)", text)
+            hotels.append({
+                "phone": phone.get_text(strip=True) if phone else None,
+                "map_url": map_link,
+                "board": board.get_text(" ", strip=True) if board else None,
+                "reservation": reservation.group(1) if reservation else None,
+                "check_in": self._parse_date(dates.group(1)),
+                "check_out": self._parse_date(dates.group(2)),
+                "location": location.group(1).strip() if location else "",
+                "name": name.get_text(" ", strip=True),
+                "address": address.find_next("div").get_text(" ", strip=True) if address else None,
+            })
         return hotels
+
+    @staticmethod
+    def _hotel_details(hotel: Optional[dict]) -> Optional[dict]:
+        """The parts of a hotel entry worth showing, as plain JSON-friendly values"""
+        if not hotel:
+            return None
+        return {
+            "name": hotel["name"],
+            "address": hotel["address"],
+            "phone": hotel["phone"],
+            "map_url": hotel["map_url"],
+            "board": hotel["board"],
+            "reservation": hotel["reservation"],
+            "check_in": hotel["check_in"].isoformat(),
+            "check_out": hotel["check_out"].isoformat(),
+        }
+
+    def _find_hotel(self, hotels: List[dict], location: str, check_in: date = None, check_out: date = None) -> Optional[dict]:
+        wanted = self._normalise(location)
+        for hotel in hotels:
+            if check_in and hotel["check_in"] != check_in:
+                continue
+            if check_out and hotel["check_out"] != check_out:
+                continue
+            if self._normalise(hotel["location"]) == wanted:
+                return hotel
+        return None
+
+    @staticmethod
+    def _normalise(text: str) -> str:
+        return re.sub(r"\W+", " ", text).strip().lower()
 
     def _parse_date(self, date_str: str) -> date:
         """Parse date from various formats"""

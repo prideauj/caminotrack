@@ -16,14 +16,6 @@ if not exist "venv\Scripts\activate.bat" (
     exit /b 1
 )
 
-REM Check if .env exists
-if not exist ".env" (
-    echo Warning: .env file not found
-    echo Please create .env with your Google OAuth credentials
-    echo (Copy from .env.example and fill in the values)
-    echo.
-)
-
 REM Activate venv
 call venv\Scripts\activate.bat
 

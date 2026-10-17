@@ -58,12 +58,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/4] Setting up Playwright browsers...
-playwright install
-if errorlevel 1 (
-    echo Warning: Playwright setup had issues, but continuing...
-)
-
 echo.
 echo ========================================
 echo  Setup Complete!

@@ -40,3 +40,6 @@ htmlcov/
 *.log
 
 secrets.txt
+elevation_cache.json
+overpass_cache/
+leg_cache/

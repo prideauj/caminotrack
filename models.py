@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import date
-from typing import Optional
+from typing import Optional, List
 
 class Hotel(BaseModel):
     name: str
@@ -12,6 +12,8 @@ class Hotel(BaseModel):
 class Stage(BaseModel):
     name: str
     trip_name: Optional[str] = None  # Which trip/booking this stage belongs to
+    booking_id: Optional[str] = None  # CaminoWays booking number
+    description: Optional[str] = None  # Day description from the itinerary
     start_location: str
     end_location: str
     start_hotel: str
@@ -25,6 +27,20 @@ class Stage(BaseModel):
     date_walked: date
     is_completed: bool
     route_geojson: Optional[str] = None  # GeoJSON of the walking route
+    # Public route data (OpenStreetMap + open elevation data), see route_data.py
+    route_name: Optional[str] = None  # e.g. "Camino Francés"
+    ascent_m: Optional[float] = None
+    descent_m: Optional[float] = None
+    effort_km: Optional[float] = None  # distance + climb penalty, in flat-km equivalents
+    difficulty_percentile: Optional[float] = None  # % of same-length stretches of the route that are easier
+    difficulty: Optional[str] = None  # Easy / Moderate / Hard / Very hard
+    difficulty_vs_trip: Optional[float] = None  # effort relative to the trip's average stage (1.0 = average)
+    route_summary: Optional[str] = None  # Short written summary of the day
+    lunch_stops: List[dict] = []  # Food places around mid-stage: name, kind, km from start, off-route metres
+    places_passed: List[dict] = []  # Villages / towns passed: name, km from start
+    route_path: List[List[float]] = []  # [lat, lon] points along the stage, for the map
+    elevation_profile: List[List[float]] = []  # [km from start, metres] points, for the height view
+    caminoways: Optional[dict] = None  # What CaminoWays itself says about the day: hotels, inclusions, service level
 
 class User(BaseModel):
     id: str
