@@ -369,7 +369,10 @@ function badgeKind(title) {
 
 function serviceDetailHtml(stage, kind) {
     const services = ((stage.caminoways || {}).services || []).filter(service => service.kind === kind);
-    if (!services.length) return '';
+    if (!services.length) {
+        // Stages saved before service details were imported have none: say so rather than do nothing
+        return `<div class="service-card"><div class="muted">No details were saved for this yet. Use <strong>Sync Data</strong> to import them from CaminoWays.</div></div>`;
+    }
     return services.map(service => {
         const phone = (service.phone || '').replace(/[^\d+]/g, '');
         const sameDay = service.from === service.to;
@@ -473,7 +476,7 @@ function hasService(stage, kind) {
 // A lozenge opens its service's details when the booking has them, otherwise it's a plain label
 function lozenge(stage, title) {
     const kind = badgeKind(title);
-    if (!kind || !hasService(stage, kind)) return `<span class="chip">✔ ${escapeHtml(title)}</span>`;
+    if (!kind || kind === 'dinner' && !hasService(stage, kind)) return `<span class="chip">✔ ${escapeHtml(title)}</span>`;
     return `<button type="button" class="chip chip-action ${state.serviceKind === kind ? 'active' : ''}" data-service="${kind}"
         aria-expanded="${state.serviceKind === kind}">✔ ${escapeHtml(title)} <small>${state.serviceKind === kind ? '▾' : '▸'}</small></button>`;
 }
