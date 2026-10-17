@@ -1,0 +1,15 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# In Render: New > Blueprint, pick this repo, and it creates the service below.
+services:
+  - type: web
+    name: caminotrack
+    runtime: python
+    plan: free            # sleeps after ~15 minutes idle and wakes on the next visit (about a minute)
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    autoDeploy: true      # redeploy on every push to the default branch
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+    # No database, disk or secrets are needed: the server keeps no user data (trips are saved in the browser).

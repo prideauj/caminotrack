@@ -36,6 +36,7 @@ _sync_slots = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 class SyncRequest(BaseModel):
     email: str
     password: str
+    include_quotes: bool = False  # also import quotes, not just confirmed bookings
 
 
 def _client_ip(request: Request) -> str:
@@ -71,7 +72,7 @@ async def sync(body: SyncRequest, request: Request):
 
     async with _sync_slots:
         try:
-            stages = await CaminoScraper().scrape_stages(body.email, body.password)
+            stages = await CaminoScraper().scrape_stages(body.email, body.password, body.include_quotes)
             # Route lookups can touch the network (geocoding unfamiliar towns), so keep them off the event loop
             await asyncio.to_thread(enrich_stages, stages)
         except LoginError as e:

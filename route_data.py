@@ -42,7 +42,9 @@ SAMPLE_STEP_KM = 0.15          # elevation sampled this often along the route
 SMOOTHING_SAMPLES = 3          # moving average window, so DEM noise isn't counted as climbing
 ASCENT_THRESHOLD_M = 8.0       # ignore climbs/descents smaller than this (hysteresis)
 ALTERNATIVE_PENALTY = 1.3      # routing cost multiplier for variant/alternative relations
-MAX_OFF_ROUTE_KM = 4.0         # a town further than this from a route isn't on it
+MAX_OFF_ROUTE_KM = 4.0         # a town further than this from a route isn't on it...
+MAX_VARIANT_OFF_ROUTE_KM = 8.0  # ...but a trip may use a variant, so a few towns can sit this far off
+MIN_TOWNS_ON_ROUTE = 0.8       # share of a trip's towns that must be within MAX_OFF_ROUTE_KM
 
 # Effort in "flat km equivalents": Naismith's rule (+1 km per 100 m up), plus a smaller penalty for descent
 ASCENT_M_PER_EFFORT_KM = 100.0
@@ -119,6 +121,22 @@ def save_data(data: dict):
 _last_nominatim_call = 0.0
 
 
+def place_on_routes(name: str, country: str, data: dict) -> Optional[Tuple[float, float]]:
+    """A town's position from the named villages stored with the routes: instant, and no network needed.
+    Only used when the name matches one place (or several close together), so a common name can't mislead."""
+    wanted = normalise(name)
+    found = []
+    for route in data["routes"].values():
+        if route.get("country") != country:
+            continue
+        for poi in route.get("pois", []):
+            if poi["kind"] == "place" and normalise(poi["name"]) == wanted:
+                found.append((poi["lat"], poi["lon"]))
+    if found and all(haversine_km(found[0], other) <= 3 for other in found):
+        return found[0]
+    return None
+
+
 def geocode(name: str, country: str, data: dict) -> Optional[Tuple[float, float]]:
     """Look a town up on Nominatim (max 1 request/second), caching results in `data`"""
     global _last_nominatim_call
@@ -127,6 +145,11 @@ def geocode(name: str, country: str, data: dict) -> Optional[Tuple[float, float]
     if key in data["geocode"]:
         cached = data["geocode"][key]
         return tuple(cached) if cached else None
+
+    on_route = place_on_routes(name, country, data)
+    if on_route:
+        data["geocode"][key] = list(on_route)
+        return on_route
 
     wait = 1.1 - (time.time() - _last_nominatim_call)
     if wait > 0:
@@ -705,7 +728,9 @@ def _enrich_trip(trip_stages: list, data: dict):
     # The route that every town in the trip sits on
     route_key = None
     for key in data["routes"]:
-        if all(key in positions[t] and positions[t][key][1] <= MAX_OFF_ROUTE_KM for t in towns):
+        offsets = [positions[t][key][1] for t in towns if key in positions[t]]
+        if len(offsets) == len(towns) and max(offsets) <= MAX_VARIANT_OFF_ROUTE_KM \
+                and sum(o <= MAX_OFF_ROUTE_KM for o in offsets) >= MIN_TOWNS_ON_ROUTE * len(towns):
             route_key = key
             break
     if route_key is None:

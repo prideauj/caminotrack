@@ -13,6 +13,7 @@ class Stage(BaseModel):
     name: str
     trip_name: Optional[str] = None  # Which trip/booking this stage belongs to
     booking_id: Optional[str] = None  # CaminoWays booking number
+    status: str = "confirmed"  # "confirmed" booking or "quote" not yet booked
     description: Optional[str] = None  # Day description from the itinerary
     start_location: str
     end_location: str

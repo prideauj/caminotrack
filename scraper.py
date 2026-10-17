@@ -23,8 +23,8 @@ class CaminoScraper:
     def __init__(self):
         self.base_url = "https://core.caminoways.com/client"
 
-    async def scrape_stages(self, email: str, password: str) -> List[Stage]:
-        """Scrape one Stage per walking day from every booking on caminoways.com"""
+    async def scrape_stages(self, email: str, password: str, include_quotes: bool = False) -> List[Stage]:
+        """Scrape one Stage per walking day from the confirmed bookings (and, if asked, the quotes)"""
         stages: List[Stage] = []
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
@@ -32,18 +32,20 @@ class CaminoScraper:
             await self._login(client, email, password)
             logger.info("Successfully logged in")
 
-            response = await client.get(f"{self.base_url}/my-bookings")
-            response.raise_for_status()
-            booking_ids = sorted(set(BOOKING_LINK_RE.findall(response.text)))
-            logger.info(f"Found {len(booking_ids)} bookings to process")
+            bookings = [(booking_id, "confirmed") for booking_id in await self._list_booking_ids(client, "my-bookings")]
+            if include_quotes:
+                confirmed = {booking_id for booking_id, _ in bookings}
+                bookings += [(booking_id, "quote") for booking_id in await self._list_booking_ids(client, "my-quote-bookings")
+                             if booking_id not in confirmed]
+            logger.info(f"Found {len(bookings)} bookings to process")
 
-            for idx, booking_id in enumerate(booking_ids):
+            for idx, (booking_id, status) in enumerate(bookings):
                 try:
-                    logger.info(f"Processing booking {idx+1}/{len(booking_ids)}: {booking_id}")
+                    logger.info(f"Processing {status} {idx+1}/{len(bookings)}: {booking_id}")
                     response = await client.get(f"{self.base_url}/booking/{booking_id}")
                     response.raise_for_status()
 
-                    booking_stages = self.parse_booking_html(response.text, booking_id)
+                    booking_stages = self.parse_booking_html(response.text, booking_id, status)
                     stages.extend(booking_stages)
                     trip_name = booking_stages[0].trip_name if booking_stages else "?"
                     logger.info(f"✓ Extracted {len(booking_stages)} stages for trip: {trip_name}")
@@ -53,6 +55,22 @@ class CaminoScraper:
 
         logger.info(f"Total stages extracted: {len(stages)}")
         return stages
+
+    async def _list_booking_ids(self, client: httpx.AsyncClient, path: str, max_pages: int = 20) -> List[str]:
+        """Booking numbers on one of the portal's lists (confirmed, quotes, ...), following its pages"""
+        ids: List[str] = []
+        pending, seen = [f"{self.base_url}/{path}"], set()
+        while pending and len(seen) < max_pages:
+            url = pending.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            response = await client.get(url)
+            response.raise_for_status()
+            ids += [i for i in BOOKING_LINK_RE.findall(response.text) if i not in ids]
+            # Pagination links look like <path>?page=2
+            pending += [f"{self.base_url}/{path}?page={n}" for n in sorted({int(n) for n in re.findall(rf"{path}\?page=(\d+)", response.text)})]
+        return ids
 
     async def _login(self, client: httpx.AsyncClient, email: str, password: str):
         """Log in through the Laravel form (CSRF token + session cookie)"""
@@ -86,8 +104,8 @@ class CaminoScraper:
     # Parsing (pure functions, no network)
     # ------------------------------------------------------------------
 
-    def parse_booking_html(self, html: str, booking_id: str) -> List[Stage]:
-        """Turn a booking page into one Stage per walking day"""
+    def parse_booking_html(self, html: str, booking_id: str, status: str = "confirmed") -> List[Stage]:
+        """Turn a booking (or quote) page into one Stage per walking day"""
         soup = BeautifulSoup(html, "lxml")
 
         trip_name = self._extract_trip_name(soup)
@@ -105,6 +123,7 @@ class CaminoScraper:
                     name=f"{previous['location']} to {day['location']}",
                     trip_name=trip_name,
                     booking_id=booking_id,
+                    status=status,
                     start_location=previous["location"],
                     end_location=day["location"],
                     start_hotel=start_hotel["name"] if start_hotel else "",
@@ -112,12 +131,13 @@ class CaminoScraper:
                     standard_distance=day["distance"],
                     actual_distance=day["distance"],
                     date_walked=day["date"],
-                    is_completed=day["date"] < date.today(),
+                    is_completed=status == "confirmed" and day["date"] < date.today(),  # a quote is never "walked"
                     description=day["description"],
                     caminoways={
                         "service_level": day["service_level"],
                         "nights": day["nights"],
                         "included": day["included"],
+                        "services": [],
                         "start_hotel": self._hotel_details(start_hotel),
                         "end_hotel": self._hotel_details(end_hotel),
                     },
@@ -127,6 +147,7 @@ class CaminoScraper:
             if previous is None or day["distance"] > 0:
                 previous = day
 
+        self._attach_services(stages, self._parse_services(soup))
         return stages
 
     def _extract_trip_name(self, soup: BeautifulSoup) -> str:
@@ -238,6 +259,88 @@ class CaminoScraper:
             "check_in": hotel["check_in"].isoformat(),
             "check_out": hotel["check_out"].isoformat(),
         }
+
+    def _parse_services(self, soup: BeautifulSoup) -> List[dict]:
+        """Luggage transfers, passenger transfers and other extras from the services section"""
+        services_el = soup.find(id="services")
+        if services_el is None:
+            return []
+
+        services, seen = [], set()
+        for card in services_el.select("div.section-card"):
+            title_el = card.find("h3")
+            if title_el is None or any("Hotel On Map" in a.get_text() for a in card.find_all("a")):
+                continue  # not a service card, or it's a hotel (handled by _parse_hotels)
+
+            # The stay dates sit in a header just before the card
+            header = card.find_previous(string=DATE_RANGE_RE)
+            dates = DATE_RANGE_RE.search(header) if header else None
+            if not dates:
+                continue
+
+            # "Bags:", "Pax:", "Pickup:" and "Dropoff:" are a label span followed by a value span
+            fields = {}
+            for span in card.find_all("span"):
+                label = span.get_text(" ", strip=True)
+                value = span.find_next_sibling("span")
+                if label.endswith(":") and len(label) < 20 and value is not None:
+                    text = re.sub(r"^\s*-\s*", "", value.get_text(" ", strip=True))
+                    fields[label[:-1].strip().lower()] = text
+
+            notes = []
+            for label in card.find_all(string=re.compile(r"Note:\s*$")):
+                body = label.parent.find_next_sibling()
+                text = " ".join(p.get_text(" ", strip=True) for p in body.find_all("p")) if body else ""
+                text = re.sub(r"\s*(Click to Expand|Learn More)\s*", " ", text).strip()
+                if text:
+                    notes.append({"label": label.strip(" :"), "text": text})
+
+            provider, pin, phone = card.find("h4"), card.select_one(".icon-pin"), card.select_one('a[href^="tel:"]')
+            title = title_el.get_text(" ", strip=True)
+            service = {
+                "kind": self._service_kind(title),
+                "title": title,
+                "provider": provider.get_text(" ", strip=True) if provider else None,
+                "address": pin.find_next("div").get_text(" ", strip=True) if pin else None,
+                "phone": phone.get_text(strip=True) if phone else None,
+                "from": self._parse_date(dates.group(1)),
+                "to": self._parse_date(dates.group(2)),
+                "bags": fields.get("bags"),
+                "pax": fields.get("pax"),
+                "pickup": fields.get("pickup"),
+                "dropoff": fields.get("dropoff"),
+                "notes": notes,
+            }
+            # Passenger names and emails are left out on purpose: only what's needed to use the service
+            key = (service["title"], service["provider"], service["pickup"], service["dropoff"], service["from"], service["to"])
+            if key not in seen:
+                seen.add(key)
+                services.append(service)
+        return services
+
+    @staticmethod
+    def _service_kind(title: str) -> str:
+        lowered = title.lower()
+        if "luggage" in lowered:
+            return "luggage"
+        if "passenger" in lowered or "people" in lowered or "transfer" in lowered:
+            return "passenger"
+        if "dinner" in lowered:
+            return "dinner"
+        return "other"
+
+    @staticmethod
+    def _attach_services(stages: List[Stage], services: List[dict]):
+        """Give each stage the services on its day. One that falls on no walking day (a transfer after the last
+        stage, say) goes to the nearest stage so it isn't lost."""
+        if not stages:
+            return
+        for service in services:
+            on_day = [st for st in stages if service["from"] <= st.date_walked <= service["to"]]
+            targets = on_day or [min(stages, key=lambda st: (abs((st.date_walked - service["from"]).days), -st.date_walked.toordinal()))]
+            for stage in targets:
+                stage.caminoways["services"].append({
+                    **service, "from": service["from"].isoformat(), "to": service["to"].isoformat()})
 
     def _find_hotel(self, hotels: List[dict], location: str, check_in: date = None, check_out: date = None) -> Optional[dict]:
         wanted = self._normalise(location)

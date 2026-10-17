@@ -449,6 +449,16 @@
         .chip { background: #f3ece4; border-radius: 14px; padding: 0.2rem 0.7rem; font-size: 0.85rem; }
         .chip small { color: #888; }
 
+        .chip-action { border: 1px solid #d9c9b8; background: white; color: var(--dark); cursor: pointer; font-family: inherit; }
+        .chip-action:hover { background: #fbeee0; }
+        .chip-action.active { background: var(--secondary); border-color: var(--secondary); color: white; }
+        .chip-action.active small { color: white; }
+        .service-card { margin-top: 0.7rem; border: 1px solid var(--secondary); border-radius: 6px; padding: 0.8rem 1rem; font-size: 0.9rem; display: grid; gap: 0.3rem; background: #fffaf5; }
+        .service-head { font-weight: 600; color: var(--primary); }
+        .service-rows { display: grid; gap: 0.2rem; margin-top: 0.2rem; }
+        .service-row { display: grid; grid-template-columns: 90px 1fr; gap: 0.5rem; }
+        .service-card a { color: var(--primary); }
+
         .lunch-list { display: grid; gap: 0.6rem; }
         .lunch { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; }
 
@@ -457,6 +467,13 @@
         .hotel-label { font-size: 0.75rem; text-transform: uppercase; color: #888; letter-spacing: 0.04em; }
         .hotel-name { font-weight: 600; }
         .hotel a, .rv-body a { color: var(--primary); }
+
+        .view-options { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.7rem; font-size: 0.9rem; min-height: 1.5rem; }
+        .view-options label { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+        .quote-badge { background: #8e24aa; }
+        .list-item.quote { background: #faf5fc; }
+        .list-item.quote:hover { background: #f5ebf9; }
+        .list-item.quote.selected { background: #f1e4f7; border-left-color: #8e24aa; }
 
         .empty-state { text-align: center; color: #888; padding: 3rem 1rem; background: white; border-radius: 8px; border: 1px solid var(--border); }
 
@@ -552,6 +569,12 @@
                 <div class="tabs">
                     <button class="tab active" data-tab="itinerary">📅 Itinerary</button>
                     <button class="tab" data-tab="map">🗺️ Map</button>
+                </div>
+
+                <!-- Show / hide quotes alongside confirmed bookings -->
+                <div id="viewOptions" class="view-options hidden">
+                    <label id="quoteToggle"><input type="checkbox" id="showQuotes"> Show quotes <span id="quoteCount" class="small"></span></label>
+                    <span id="quoteHint" class="small">No quotes imported. Use Sync Data and tick "Also import quotes" to see them here.</span>
                 </div>
 
                 <!-- Itinerary: trips | stages | details -->

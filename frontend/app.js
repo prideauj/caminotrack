@@ -1,11 +1,33 @@
 // The server keeps no user data: a sync returns the stages and this page stores them in the browser.
 const STORAGE_KEY = 'caminotrack.stages.v1';
 
+function readPref(key, fallback) {
+    try {
+        const value = localStorage.getItem(key);
+        return value === null ? fallback : value === 'true';
+    } catch (error) {
+        return fallback;
+    }
+}
+
+function writePref(key, value) {
+    try {
+        localStorage.setItem(key, String(value));
+    } catch (error) {
+        console.error('Could not save preference:', error);
+    }
+}
+
+const SHOW_QUOTES_KEY = 'caminotrack.showQuotes';
+const IMPORT_QUOTES_KEY = 'caminotrack.importQuotes';
+
 const state = {
     stages: [],
+    showQuotes: readPref(SHOW_QUOTES_KEY, true),  // show quotes alongside confirmed bookings
     tripKey: null,        // selected trip (column 1)
     stageId: null,        // selected stage (column 2)
     detailTab: 'general', // 'general' | 'caminoways' (column 3)
+    serviceKind: null,    // which lozenge is open on the CaminoWays view: 'luggage' | 'passenger' | ...
     mapMode: 'route',     // 'route' | 'height', shared by every route view
     mapScope: 'trip',     // 'trip' | 'stage', for the Map tab
     pane: 'trips',        // which column shows on narrow screens
@@ -36,6 +58,15 @@ function escapeHtml(text) {
 // Links come from scraped pages, so only ever follow plain web links
 function safeUrl(url) {
     return /^https?:\/\//i.test(url || '') ? url : null;
+}
+
+// Quotes are proposed trips that haven't been booked. Saved data from before quotes existed has no status.
+function isQuote(stage) {
+    return stage.status === 'quote';
+}
+
+function visibleStages() {
+    return state.stages.filter(stage => state.showQuotes || !isQuote(stage));
 }
 
 function stageIdOf(stage) {
@@ -108,7 +139,7 @@ function saveStages() {
 // Group stages into trips (by booking), each with totals
 function buildTrips() {
     const groups = new Map();
-    [...state.stages]
+    [...visibleStages()]
         .sort((a, b) => a.date_walked.localeCompare(b.date_walked))
         .forEach(stage => {
             const key = tripKeyOf(stage);
@@ -126,6 +157,7 @@ function buildTrips() {
         ascent: sum(stages, 'ascent_m'),
         descent: sum(stages, 'descent_m'),
         hasClimb: stages.some(s => s.ascent_m != null),
+        isQuote: isQuote(stages[0]),
         start: stages[0].date_walked,
         end: stages[stages.length - 1].date_walked,
         done: stages.filter(s => s.is_completed).length
@@ -143,12 +175,13 @@ function currentStage() {
 function refreshAll() {
     const today = new Date().toISOString().slice(0, 10);
     // Completion depends on today's date, so work it out now rather than trusting the value saved at sync time
-    state.stages.forEach(stage => { stage.is_completed = stage.date_walked < today; });
+    state.stages.forEach(stage => { stage.is_completed = !isQuote(stage) && stage.date_walked < today; });
 
     const trips = buildTrips();
     if (!currentTrip(trips)) {
-        // Open on the next trip still to walk, or the latest one
-        const next = trips.find(t => t.done < t.stages.length) || trips[trips.length - 1];
+        // Open on the next confirmed trip still to walk, or the latest one (quotes only if there's nothing else)
+        const confirmed = trips.filter(t => !t.isQuote);
+        const next = confirmed.find(t => t.done < t.stages.length) || confirmed[confirmed.length - 1] || trips[0];
         state.tripKey = next ? next.key : null;
         state.stageId = null;
     }
@@ -159,17 +192,31 @@ function refreshAll() {
     }
 
     updateStats();
+    renderViewOptions();
     renderItinerary(trips);
     renderMapTab();
 }
 
 function updateStats() {
-    const completed = state.stages.filter(s => s.is_completed);
+    // Quotes aren't walked or booked, so they stay out of the totals
+    const confirmed = state.stages.filter(s => !isQuote(s));
+    const completed = confirmed.filter(s => s.is_completed);
     const sum = list => list.reduce((total, s) => total + (s.actual_distance || 0), 0);
-    $('totalStages').textContent = state.stages.length;
+    $('totalStages').textContent = confirmed.length;
     $('completedStages').textContent = completed.length;
     $('totalDistance').textContent = sum(completed).toFixed(1) + ' km';
-    $('remainingDistance').textContent = sum(state.stages.filter(s => !s.is_completed)).toFixed(1) + ' km';
+    $('remainingDistance').textContent = sum(confirmed.filter(s => !s.is_completed)).toFixed(1) + ' km';
+}
+
+// "Show quotes" toggle, shown above both tabs
+function renderViewOptions() {
+    const bar = $('viewOptions');
+    const quoteTrips = new Set(state.stages.filter(isQuote).map(tripKeyOf)).size;
+    bar.classList.toggle('hidden', !state.stages.length);
+    $('quoteToggle').classList.toggle('hidden', quoteTrips === 0);
+    $('quoteHint').classList.toggle('hidden', quoteTrips !== 0);
+    $('showQuotes').checked = state.showQuotes;
+    $('quoteCount').textContent = quoteTrips ? `(${quoteTrips})` : '';
 }
 
 // ----------------------------------------------------------------------
@@ -207,19 +254,19 @@ function renderTrips(trips) {
     pane.innerHTML = '<div class="pane-head">Trips</div>';
     trips.forEach(trip => {
         const item = document.createElement('div');
-        item.className = 'list-item' + (trip.key === state.tripKey ? ' selected' : '');
+        item.className = 'list-item' + (trip.isQuote ? ' quote' : '') + (trip.key === state.tripKey ? ' selected' : '');
         item.tabIndex = 0;
         const allDone = trip.done === trip.stages.length;
         item.innerHTML = `
-            <div class="item-title">${escapeHtml(trip.name)}</div>
+            <div class="item-title">${escapeHtml(trip.name)} ${trip.isQuote ? '<span class="badge quote-badge">Quote</span>' : ''}</div>
             ${trip.routeName ? `<div class="item-sub">${escapeHtml(trip.routeName)}</div>` : ''}
             <div class="item-sub">${formatDate(trip.start)} – ${formatDate(trip.end)}</div>
             <div class="item-meta">
                 ${trip.stages.length} stages · ${trip.km.toFixed(0)} km${trip.hasClimb ? ` · ⬆ ${Math.round(trip.ascent)} m` : ''}
             </div>
-            <div class="progress" title="${trip.done} of ${trip.stages.length} stages walked">
+            ${trip.isQuote ? '' : `<div class="progress" title="${trip.done} of ${trip.stages.length} stages walked">
                 <div style="width: ${100 * trip.done / trip.stages.length}%; background: ${allDone ? 'var(--success)' : 'var(--warning)'};"></div>
-            </div>`;
+            </div>`}`;
         activate(item, () => {
             if (state.tripKey !== trip.key) {
                 state.tripKey = trip.key;
@@ -242,12 +289,12 @@ function renderStages(trips) {
             <span>${escapeHtml(trip.name)}</span></div>`;
     trip.stages.forEach((stage, index) => {
         const item = document.createElement('div');
-        item.className = 'list-item' + (stageIdOf(stage) === state.stageId ? ' selected' : '');
+        item.className = 'list-item' + (isQuote(stage) ? ' quote' : '') + (stageIdOf(stage) === state.stageId ? ' selected' : '');
         item.tabIndex = 0;
         item.innerHTML = `
             <div class="item-row">
                 <div class="item-title">${escapeHtml(stage.start_location)} → ${escapeHtml(stage.end_location)}</div>
-                <span class="status" title="${stage.is_completed ? 'Walked' : 'Upcoming'}">${stage.is_completed ? '✅' : '⏳'}</span>
+                <span class="status" title="${isQuote(stage) ? 'Quote' : stage.is_completed ? 'Walked' : 'Upcoming'}">${isQuote(stage) ? '📝' : stage.is_completed ? '✅' : '⏳'}</span>
             </div>
             <div class="item-sub">Day ${index + 1} · ${formatDate(stage.date_walked)}</div>
             <div class="item-meta">
@@ -262,6 +309,7 @@ function renderStages(trips) {
 
 function selectStageById(id, pane) {
     state.stageId = id;
+    state.serviceKind = null;
     if (pane) state.pane = pane;
     refreshAll();
 }
@@ -278,7 +326,7 @@ function renderDetail() {
         <div class="detail-body">
             <h2>${escapeHtml(stage.start_location)} → ${escapeHtml(stage.end_location)}</h2>
             <div class="detail-sub">${formatDate(stage.date_walked, true)} ·
-                ${stage.is_completed ? '✅ Walked' : '⏳ Upcoming'}</div>
+                ${isQuote(stage) ? '📝 Quote, not booked' : stage.is_completed ? '✅ Walked' : '⏳ Upcoming'}</div>
             <div class="segmented">
                 <button data-seg="general" class="${state.detailTab === 'general' ? 'active' : ''}">General</button>
                 <button data-seg="caminoways" class="${state.detailTab === 'caminoways' ? 'active' : ''}">CaminoWays</button>
@@ -293,6 +341,13 @@ function renderDetail() {
         });
     });
 
+    pane.querySelectorAll('[data-service]').forEach(button => {
+        button.addEventListener('click', () => {
+            state.serviceKind = state.serviceKind === button.dataset.service ? null : button.dataset.service;
+            renderDetail();
+        });
+    });
+
     if (state.detailTab === 'general') {
         const host = $('miniRoute');
         if (host) {
@@ -300,6 +355,41 @@ function renderDetail() {
             miniView.setData([stage], stageIdOf(stage));
         }
     }
+}
+
+const SERVICE_ICONS = { luggage: '🧳', passenger: '🚐', dinner: '🍽️', other: '🛎️' };
+
+// Which kind of service a lozenge (the little inclusion badges) stands for
+function badgeKind(title) {
+    if (/luggage/i.test(title)) return 'luggage';
+    if (/people|passenger|transfer/i.test(title)) return 'passenger';
+    if (/dinner/i.test(title)) return 'dinner';
+    return null;
+}
+
+function serviceDetailHtml(stage, kind) {
+    const services = ((stage.caminoways || {}).services || []).filter(service => service.kind === kind);
+    if (!services.length) return '';
+    return services.map(service => {
+        const phone = (service.phone || '').replace(/[^\d+]/g, '');
+        const sameDay = service.from === service.to;
+        const row = (label, value) => value ? `<div class="service-row"><span class="muted">${label}</span><span>${escapeHtml(value)}</span></div>` : '';
+        return `
+            <div class="service-card">
+                <div class="service-head">${SERVICE_ICONS[kind] || SERVICE_ICONS.other} ${escapeHtml(service.title)}
+                    <span class="muted">· ${sameDay ? formatDate(service.from) : `${formatDate(service.from)} – ${formatDate(service.to)}`}</span></div>
+                ${service.provider ? `<div class="hotel-name">${escapeHtml(service.provider)}</div>` : ''}
+                ${service.address ? `<div>📍 ${escapeHtml(service.address.replace(/\b(\d{4,5}),\s*\1\b/g, '$1'))}</div>` : ''}
+                ${phone ? `<div>📞 <a href="tel:${phone}">${escapeHtml(service.phone)}</a></div>` : ''}
+                <div class="service-rows">
+                    ${row('Bags', service.bags)}
+                    ${row('Passengers', service.pax)}
+                    ${row('Pickup', service.pickup)}
+                    ${row('Drop-off', service.dropoff)}
+                </div>
+                ${(service.notes || []).map(note => `<p class="small"><strong>${escapeHtml(note.label)}:</strong> ${escapeHtml(note.text)}</p>`).join('')}
+            </div>`;
+    }).join('');
 }
 
 function metric(label, value) {
@@ -376,27 +466,54 @@ function hotelCard(label, hotel, fallbackName) {
         </div>`;
 }
 
+function hasService(stage, kind) {
+    return ((stage.caminoways || {}).services || []).some(service => service.kind === kind);
+}
+
+// A lozenge opens its service's details when the booking has them, otherwise it's a plain label
+function lozenge(stage, title) {
+    const kind = badgeKind(title);
+    if (!kind || !hasService(stage, kind)) return `<span class="chip">✔ ${escapeHtml(title)}</span>`;
+    return `<button type="button" class="chip chip-action ${state.serviceKind === kind ? 'active' : ''}" data-service="${kind}"
+        aria-expanded="${state.serviceKind === kind}">✔ ${escapeHtml(title)} <small>${state.serviceKind === kind ? '▾' : '▸'}</small></button>`;
+}
+
+// Services the booking lists that none of the day's lozenges stand for (an extra dinner, say)
+function extraServiceLozenges(stage, included) {
+    const shown = new Set(included.map(badgeKind).filter(Boolean));
+    const extras = new Map();
+    ((stage.caminoways || {}).services || []).forEach(service => {
+        if (!shown.has(service.kind) && !extras.has(service.kind)) extras.set(service.kind, service.title);
+    });
+    return [...extras].map(([kind, title]) => `
+        <button type="button" class="chip chip-action ${state.serviceKind === kind ? 'active' : ''}" data-service="${kind}"
+            aria-expanded="${state.serviceKind === kind}">${SERVICE_ICONS[kind] || SERVICE_ICONS.other} ${escapeHtml(title)}
+            <small>${state.serviceKind === kind ? '▾' : '▸'}</small></button>`).join('');
+}
+
 // CaminoWays: what the booking itself says
 function caminowaysHtml(stage) {
     const cw = stage.caminoways || {};
     const included = cw.included || [];
     return `
         <section>
-            <h4>📋 Your booking</h4>
+            <h4>📋 Your ${isQuote(stage) ? 'quote' : 'booking'}</h4>
             <div class="chips">
                 ${cw.service_level ? `<span class="chip" title="${escapeHtml(cw.service_level.name)}">${escapeHtml(cw.service_level.name)} service</span>` : ''}
                 ${cw.nights ? `<span class="chip">🌙 ${cw.nights} night${cw.nights > 1 ? 's' : ''}</span>` : ''}
-                ${included.map(item => `<span class="chip">✔ ${escapeHtml(item)}</span>`).join('')}
+                ${included.map(item => lozenge(stage, item)).join('')}
+                ${extraServiceLozenges(stage, included)}
             </div>
-            ${stage.booking_id ? `<p class="small">CaminoWays booking ${escapeHtml(stage.booking_id)}</p>` : ''}
+            <div id="serviceDetail">${state.serviceKind ? serviceDetailHtml(stage, state.serviceKind) : ''}</div>
+            ${stage.booking_id ? `<p class="small">CaminoWays ${isQuote(stage) ? 'quote' : 'booking'} ${escapeHtml(stage.booking_id)}</p>` : ''}
         </section>
 
         <section>
             <h4>🏨 Accommodation</h4>
-            <div class="hotels">
+            ${cw.start_hotel || cw.end_hotel || stage.start_hotel || stage.end_hotel ? `<div class="hotels">
                 ${hotelCard('Night before', cw.start_hotel, stage.start_hotel)}
                 ${hotelCard('Tonight', cw.end_hotel, stage.end_hotel)}
-            </div>
+            </div>` : `<p class="muted">${isQuote(stage) ? 'A quote has no hotel details yet.' : 'No hotel details found.'}</p>`}
         </section>
 
         ${stage.description ? `
@@ -512,9 +629,11 @@ class RouteView {
         this.stages.forEach((stage, index) => {
             const id = stageIdOf(stage);
             const focused = id === this.focusId;
-            const color = stage.is_completed ? '#2e7d32' : '#e65100';
+            const quote = isQuote(stage);
+            const color = quote ? '#8e24aa' : stage.is_completed ? '#2e7d32' : '#e65100';
             const line = L.polyline(stage.route_path, {
                 color,
+                dashArray: quote ? '8 8' : null,
                 weight: focused && several ? 7 : 5,
                 opacity: focused || !several ? 0.95 : 0.55
             }).addTo(this.routeLayer);
@@ -765,6 +884,11 @@ function setupEventListeners() {
     });
     $('logoutBtn').addEventListener('click', clearData);
     $('syncBtn').addEventListener('click', openSyncDialog);
+    $('showQuotes').addEventListener('change', e => {
+        state.showQuotes = e.target.checked;
+        writePref(SHOW_QUOTES_KEY, state.showQuotes);
+        refreshAll();
+    });
     $('mapScope').addEventListener('change', e => { state.mapScope = e.target.value; renderMapTab(); });
 
     // "‹ Trips" / "‹ Stages" buttons for narrow screens, where one column shows at a time
@@ -803,6 +927,10 @@ function openSyncDialog() {
                 <label for="syncPassword">CaminoWays password</label>
                 <input type="password" id="syncPassword" required autocomplete="off">
             </div>
+            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; margin-bottom: 0.7rem;">
+                <input type="checkbox" id="syncQuotes" ${readPref(IMPORT_QUOTES_KEY, true) ? 'checked' : ''}>
+                Also import quotes (trips not yet booked)
+            </label>
             <div id="syncError" style="color: #E53935; font-size: 0.9rem; margin-bottom: 0.7rem; min-height: 1.2em;"></div>
             <div style="display: flex; gap: 0.7rem;">
                 <button type="button" id="syncCancel" style="flex: 1; background: #999;">Cancel</button>
@@ -826,6 +954,8 @@ async function runSync(modal) {
     const errorBox = modal.querySelector('#syncError');
     const email = modal.querySelector('#syncEmail').value.trim();
     const passwordInput = modal.querySelector('#syncPassword');
+    const includeQuotes = modal.querySelector('#syncQuotes').checked;
+    writePref(IMPORT_QUOTES_KEY, includeQuotes);
 
     submit.innerHTML = '<span class="spinner"></span> Syncing...';
     submit.disabled = true;
@@ -835,7 +965,7 @@ async function runSync(modal) {
         const response = await fetch('/api/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: email, password: passwordInput.value })
+            body: JSON.stringify({ email: email, password: passwordInput.value, include_quotes: includeQuotes })
         });
         passwordInput.value = '';
 
@@ -846,6 +976,10 @@ async function runSync(modal) {
 
         const data = await response.json();
         state.stages = data.stages;
+        if (includeQuotes && data.stages.some(isQuote)) {
+            state.showQuotes = true;  // they asked for quotes, so show what came back
+            writePref(SHOW_QUOTES_KEY, true);
+        }
         state.tripKey = null;
         state.stageId = null;
         state.pane = 'trips';
