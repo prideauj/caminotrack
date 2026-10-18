@@ -12,4 +12,6 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
+      - key: GOOGLE_PLACES_API_KEY   # optional: adds Google ratings and reviews to lunch stops
+        sync: false
     # No database, disk or secrets are needed: the server keeps no user data (trips are saved in the browser).

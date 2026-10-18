@@ -20,17 +20,30 @@ function writePref(key, value) {
 
 const SHOW_QUOTES_KEY = 'caminotrack.showQuotes';
 const IMPORT_QUOTES_KEY = 'caminotrack.importQuotes';
+const TRIPS_KEY = 'caminotrack.tripKeys';
+
+function readTripKeys() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(TRIPS_KEY) || 'null');
+        return Array.isArray(saved) ? saved : null;
+    } catch (error) {
+        return null;
+    }
+}
 
 const state = {
     stages: [],
     showQuotes: readPref(SHOW_QUOTES_KEY, true),  // show quotes alongside confirmed bookings
-    tripKey: null,        // selected trip (column 1)
-    stageId: null,        // selected stage (column 2)
-    detailTab: 'general', // 'general' | 'caminoways' (column 3)
+    tripKeys: readTripKeys(), // trips picked in the drop-down (null until chosen: then the next trip to walk)
+    tripMenuOpen: false,
+    view: 'overview',     // what column 2 shows: 'overview' of the selected trips, or one 'stage'
+    stageId: null,        // selected stage
+    stopKey: null,        // selected lunch stop (a dot on the maps / height profile, a row in the stage)
+    detailTab: 'general', // 'general' | 'caminoways' (stage details)
     serviceKind: null,    // which lozenge is open on the CaminoWays view: 'luggage' | 'passenger' | ...
     mapMode: 'route',     // 'route' | 'height', shared by every route view
     mapScope: 'trip',     // 'trip' | 'stage', for the Map tab
-    pane: 'trips',        // which column shows on narrow screens
+    pane: 'stages',       // which column shows on narrow screens: 'stages' | 'detail'
     user: null,           // { lat, lon, acc } from the browser's location
     watchId: null,
     locateError: null
@@ -147,16 +160,12 @@ function buildTrips() {
             groups.get(key).push(stage);
         });
 
-    const sum = (list, field) => list.reduce((total, s) => total + (s[field] || 0), 0);
     return [...groups.entries()].map(([key, stages]) => ({
         key,
         name: stages[0].trip_name || 'Trip',
         routeName: (stages.find(s => s.route_name) || {}).route_name,
         stages,
-        km: sum(stages, 'actual_distance'),
-        ascent: sum(stages, 'ascent_m'),
-        descent: sum(stages, 'descent_m'),
-        hasClimb: stages.some(s => s.ascent_m != null),
+        stats: tripStats(stages),
         isQuote: isQuote(stages[0]),
         start: stages[0].date_walked,
         end: stages[stages.length - 1].date_walked,
@@ -164,12 +173,76 @@ function buildTrips() {
     })).sort((a, b) => a.start.localeCompare(b.start));
 }
 
-function currentTrip(trips) {
-    return trips.find(t => t.key === state.tripKey) || null;
+// Nights of a trip: first check-in to last check-out where the hotels are known, else the nights the itinerary lists
+function nightsFor(stages) {
+    const dates = [];
+    stages.forEach(stage => {
+        const cw = stage.caminoways || {};
+        [cw.start_hotel, cw.end_hotel].forEach(hotel => {
+            if (hotel && hotel.check_in) dates.push(hotel.check_in);
+            if (hotel && hotel.check_out) dates.push(hotel.check_out);
+        });
+    });
+    if (dates.length) {
+        dates.sort();
+        const nights = Math.round((new Date(dates[dates.length - 1]) - new Date(dates[0])) / 86400000);
+        if (nights > 0) return nights;
+    }
+    return stages.reduce((total, s) => total + ((s.caminoways || {}).nights || 0), 0);
+}
+
+// Official distance is what CaminoWays publishes; actual is hotel to hotel where we could work it out
+function tripStats(stages) {
+    const sum = field => stages.reduce((total, s) => total + (s[field] || 0), 0);
+    const count = stages.length;
+    const official = sum('standard_distance'), actual = sum('actual_distance');
+    return {
+        count, official, actual,
+        avgOfficial: count ? official / count : 0,
+        avgActual: count ? actual / count : 0,
+        nights: nightsFor(stages),
+        ascent: sum('ascent_m'),
+        descent: sum('descent_m'),
+        hasClimb: stages.some(s => s.ascent_m != null),
+        byHotels: stages.filter(s => s.actual_basis === 'hotels').length,
+        byRoute: stages.filter(s => s.actual_basis === 'route').length
+    };
+}
+
+function combineStats(list) {
+    const total = list.reduce((all, s) => ({
+        count: all.count + s.count, official: all.official + s.official, actual: all.actual + s.actual,
+        nights: all.nights + s.nights, ascent: all.ascent + s.ascent, descent: all.descent + s.descent,
+        hasClimb: all.hasClimb || s.hasClimb, byHotels: all.byHotels + s.byHotels, byRoute: all.byRoute + s.byRoute
+    }), { count: 0, official: 0, actual: 0, nights: 0, ascent: 0, descent: 0, hasClimb: false, byHotels: 0, byRoute: 0 });
+    total.avgOfficial = total.count ? total.official / total.count : 0;
+    total.avgActual = total.count ? total.actual / total.count : 0;
+    return total;
+}
+
+function selectedTrips(trips) {
+    return trips.filter(t => (state.tripKeys || []).includes(t.key));
+}
+
+function selectedStages(trips) {
+    return selectedTrips(trips).flatMap(t => t.stages);
 }
 
 function currentStage() {
     return state.stages.find(s => stageIdOf(s) === state.stageId) || null;
+}
+
+function setTripKeys(keys) {
+    state.tripKeys = keys;
+    try {
+        localStorage.setItem(TRIPS_KEY, JSON.stringify(keys));
+    } catch (error) {
+        console.error('Could not save the trip selection:', error);
+    }
+    state.stageId = null;
+    state.view = 'overview';
+    state.pane = 'stages';
+    refreshAll();
 }
 
 function refreshAll() {
@@ -178,21 +251,27 @@ function refreshAll() {
     state.stages.forEach(stage => { stage.is_completed = !isQuote(stage) && stage.date_walked < today; });
 
     const trips = buildTrips();
-    if (!currentTrip(trips)) {
+    if (Array.isArray(state.tripKeys)) {
+        const valid = state.tripKeys.filter(key => trips.some(t => t.key === key));
+        // A saved selection that no longer exists (new sync, quotes hidden) starts over from the default
+        state.tripKeys = valid.length || !state.tripKeys.length ? valid : null;
+    }
+    if (state.tripKeys === null) {
         // Open on the next confirmed trip still to walk, or the latest one (quotes only if there's nothing else)
         const confirmed = trips.filter(t => !t.isQuote);
         const next = confirmed.find(t => t.done < t.stages.length) || confirmed[confirmed.length - 1] || trips[0];
-        state.tripKey = next ? next.key : null;
-        state.stageId = null;
-    }
-    const trip = currentTrip(trips);
-    if (trip && !trip.stages.some(s => stageIdOf(s) === state.stageId)) {
-        const nextStage = trip.stages.find(s => !s.is_completed) || trip.stages[0];
-        state.stageId = stageIdOf(nextStage);
+        state.tripKeys = next ? [next.key] : [];
     }
 
+    const stages = selectedStages(trips);
+    if (state.stageId && !stages.some(s => stageIdOf(s) === state.stageId)) {
+        state.stageId = null;
+        state.view = 'overview';
+    }
+    if (state.stopKey && !findStop(state.stopKey)) state.stopKey = null;
+
     updateStats();
-    renderViewOptions();
+    renderViewOptions(trips);
     renderItinerary(trips);
     renderMapTab();
 }
@@ -201,15 +280,19 @@ function updateStats() {
     // Quotes aren't walked or booked, so they stay out of the totals
     const confirmed = state.stages.filter(s => !isQuote(s));
     const completed = confirmed.filter(s => s.is_completed);
-    const sum = list => list.reduce((total, s) => total + (s.actual_distance || 0), 0);
+    const remaining = confirmed.filter(s => !s.is_completed);
+    const sum = (list, field) => list.reduce((total, s) => total + (s[field] || 0), 0);
     $('totalStages').textContent = confirmed.length;
     $('completedStages').textContent = completed.length;
-    $('totalDistance').textContent = sum(completed).toFixed(1) + ' km';
-    $('remainingDistance').textContent = sum(confirmed.filter(s => !s.is_completed)).toFixed(1) + ' km';
+    // Actual (hotel to hotel) is the main figure, the published distance sits under it
+    $('totalDistance').textContent = sum(completed, 'actual_distance').toFixed(1) + ' km';
+    $('totalDistanceOfficial').textContent = `official ${sum(completed, 'standard_distance').toFixed(1)} km`;
+    $('remainingDistance').textContent = sum(remaining, 'actual_distance').toFixed(1) + ' km';
+    $('remainingDistanceOfficial').textContent = `official ${sum(remaining, 'standard_distance').toFixed(1)} km`;
 }
 
-// "Show quotes" toggle, shown above both tabs
-function renderViewOptions() {
+// Trip picker and "Show quotes" toggle, shown above both tabs
+function renderViewOptions(trips) {
     const bar = $('viewOptions');
     const quoteTrips = new Set(state.stages.filter(isQuote).map(tripKeyOf)).size;
     bar.classList.toggle('hidden', !state.stages.length);
@@ -217,10 +300,33 @@ function renderViewOptions() {
     $('quoteHint').classList.toggle('hidden', quoteTrips !== 0);
     $('showQuotes').checked = state.showQuotes;
     $('quoteCount').textContent = quoteTrips ? `(${quoteTrips})` : '';
+    renderTripPicker(trips);
+}
+
+function renderTripPicker(trips) {
+    const chosen = selectedTrips(trips);
+    const label = !chosen.length ? 'Select trips' : chosen.length === 1 ? chosen[0].name : `${chosen.length} trips selected`;
+    $('tripPicker').innerHTML = `
+        <button type="button" class="picker-btn" id="tripPickerBtn" aria-haspopup="true" aria-expanded="${state.tripMenuOpen}">
+            🧭 <span class="picker-label">${escapeHtml(label)}</span> <small>▾</small></button>
+        <div class="picker-menu ${state.tripMenuOpen ? '' : 'hidden'}" role="group" aria-label="Trips">
+            <div class="picker-actions">
+                <button type="button" data-picker="all">Select all</button>
+                <button type="button" data-picker="none">Clear</button>
+            </div>
+            ${trips.map((trip, index) => `
+                <label class="picker-row">
+                    <input type="checkbox" data-trip="${index}" ${chosen.includes(trip) ? 'checked' : ''}>
+                    <span>
+                        <span class="picker-name">${escapeHtml(trip.name)} ${trip.isQuote ? '<span class="badge quote-badge">Quote</span>' : ''}</span>
+                        <span class="picker-sub">${formatDate(trip.start)} – ${formatDate(trip.end)} · ${trip.stages.length} stages</span>
+                    </span>
+                </label>`).join('')}
+        </div>`;
 }
 
 // ----------------------------------------------------------------------
-// Itinerary: trips | stages | details
+// Itinerary: stages | details (the trips are picked from the drop-down above)
 // ----------------------------------------------------------------------
 
 function renderItinerary(trips) {
@@ -228,7 +334,6 @@ function renderItinerary(trips) {
     mail.dataset.pane = state.pane;
 
     if (!state.stages.length) {
-        $('tripsPane').innerHTML = '';
         $('stagesPane').innerHTML = '';
         $('detailPane').innerHTML = '';
         destroyMiniView();
@@ -239,7 +344,6 @@ function renderItinerary(trips) {
     mail.classList.remove('hidden');
     $('emptyState').classList.add('hidden');
 
-    renderTrips(trips);
     renderStages(trips);
     renderDetail();
 }
@@ -249,76 +353,161 @@ function activate(el, handler) {
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } });
 }
 
-function renderTrips(trips) {
-    const pane = $('tripsPane');
-    pane.innerHTML = '<div class="pane-head">Trips</div>';
-    trips.forEach(trip => {
-        const item = document.createElement('div');
-        item.className = 'list-item' + (trip.isQuote ? ' quote' : '') + (trip.key === state.tripKey ? ' selected' : '');
-        item.tabIndex = 0;
-        const allDone = trip.done === trip.stages.length;
-        item.innerHTML = `
-            <div class="item-title">${escapeHtml(trip.name)} ${trip.isQuote ? '<span class="badge quote-badge">Quote</span>' : ''}</div>
-            ${trip.routeName ? `<div class="item-sub">${escapeHtml(trip.routeName)}</div>` : ''}
-            <div class="item-sub">${formatDate(trip.start)} – ${formatDate(trip.end)}</div>
-            <div class="item-meta">
-                ${trip.stages.length} stages · ${trip.km.toFixed(0)} km${trip.hasClimb ? ` · ⬆ ${Math.round(trip.ascent)} m` : ''}
-            </div>
-            ${trip.isQuote ? '' : `<div class="progress" title="${trip.done} of ${trip.stages.length} stages walked">
-                <div style="width: ${100 * trip.done / trip.stages.length}%; background: ${allDone ? 'var(--success)' : 'var(--warning)'};"></div>
-            </div>`}`;
-        activate(item, () => {
-            if (state.tripKey !== trip.key) {
-                state.tripKey = trip.key;
-                state.stageId = null;
-            }
-            state.pane = 'stages';
-            refreshAll();
-        });
-        pane.appendChild(item);
-    });
-}
-
 function renderStages(trips) {
-    const trip = currentTrip(trips);
+    const chosen = selectedTrips(trips);
     const pane = $('stagesPane');
-    if (!trip) { pane.innerHTML = ''; return; }
+    if (!chosen.length) {
+        pane.innerHTML = `<div class="pane-head">Stages</div>
+            <div class="pane-empty">Choose one or more trips from the <strong>Trips</strong> drop-down above.</div>`;
+        return;
+    }
 
-    pane.innerHTML = `
-        <div class="pane-head"><button class="back-btn" data-back="trips">‹ Trips</button>
-            <span>${escapeHtml(trip.name)}</span></div>`;
-    trip.stages.forEach((stage, index) => {
-        const item = document.createElement('div');
-        item.className = 'list-item' + (isQuote(stage) ? ' quote' : '') + (stageIdOf(stage) === state.stageId ? ' selected' : '');
-        item.tabIndex = 0;
-        item.innerHTML = `
-            <div class="item-row">
-                <div class="item-title">${escapeHtml(stage.start_location)} → ${escapeHtml(stage.end_location)}</div>
-                <span class="status" title="${isQuote(stage) ? 'Quote' : stage.is_completed ? 'Walked' : 'Upcoming'}">${isQuote(stage) ? '📝' : stage.is_completed ? '✅' : '⏳'}</span>
-            </div>
-            <div class="item-sub">Day ${index + 1} · ${formatDate(stage.date_walked)}</div>
-            <div class="item-meta">
-                ${(stage.actual_distance || 0).toFixed(0)} km
-                ${stage.ascent_m != null ? ` · ⬆ ${Math.round(stage.ascent_m)} m ⬇ ${Math.round(stage.descent_m)} m` : ''}
-                ${difficultyBadge(stage)}
-            </div>`;
-        activate(item, () => selectStageById(stageIdOf(stage), 'detail'));
-        pane.appendChild(item);
+    const total = combineStats(chosen.map(t => t.stats));
+    pane.innerHTML = '<div class="pane-head">Stages</div>';
+
+    const overview = document.createElement('div');
+    overview.className = 'list-item overview' + (state.view === 'overview' ? ' selected' : '');
+    overview.tabIndex = 0;
+    overview.innerHTML = `
+        <div class="item-title">📊 Overview</div>
+        <div class="item-sub">${chosen.length === 1 ? escapeHtml(chosen[0].name) : `${chosen.length} trips`}</div>
+        <div class="item-meta">${total.count} stages · ${total.actual.toFixed(0)} km · ${total.nights} nights</div>`;
+    activate(overview, () => {
+        state.view = 'overview';
+        state.stageId = null;
+        state.pane = 'detail';
+        refreshAll();
+    });
+    pane.appendChild(overview);
+
+    chosen.forEach(trip => {
+        if (chosen.length > 1) {
+            const head = document.createElement('div');
+            head.className = 'trip-head' + (trip.isQuote ? ' quote' : '');
+            head.innerHTML = `${escapeHtml(trip.name)} ${trip.isQuote ? '<span class="badge quote-badge">Quote</span>' : ''}
+                <span class="item-sub">${formatDate(trip.start)} – ${formatDate(trip.end)}</span>`;
+            pane.appendChild(head);
+        }
+        trip.stages.forEach((stage, index) => {
+            const item = document.createElement('div');
+            item.className = 'list-item' + (isQuote(stage) ? ' quote' : '') + (state.view === 'stage' && stageIdOf(stage) === state.stageId ? ' selected' : '');
+            item.tabIndex = 0;
+            item.innerHTML = `
+                <div class="item-row">
+                    <div class="item-title">${escapeHtml(stage.start_location)} → ${escapeHtml(stage.end_location)}</div>
+                    <span class="status" title="${isQuote(stage) ? 'Quote' : stage.is_completed ? 'Walked' : 'Upcoming'}">${isQuote(stage) ? '📝' : stage.is_completed ? '✅' : '⏳'}</span>
+                </div>
+                <div class="item-sub">Day ${index + 1} · ${formatDate(stage.date_walked)}</div>
+                <div class="item-meta">
+                    <span>${(stage.actual_distance || 0).toFixed(1)} km <span class="muted" title="Distance published by CaminoWays">(official ${(stage.standard_distance || 0).toFixed(0)})</span></span>
+                    ${stage.ascent_m != null ? `<span>⬆ ${Math.round(stage.ascent_m)} m ⬇ ${Math.round(stage.descent_m)} m</span>` : ''}
+                    ${difficultyBadge(stage)}
+                </div>`;
+            activate(item, () => selectStageById(stageIdOf(stage), 'detail'));
+            pane.appendChild(item);
+        });
     });
 }
 
 function selectStageById(id, pane) {
     state.stageId = id;
+    state.view = 'stage';
     state.serviceKind = null;
     if (pane) state.pane = pane;
     refreshAll();
 }
 
+// What the selected trips add up to: distances (hotel to hotel and official), nights, average stage
+function overviewHtml(trips) {
+    const chosen = selectedTrips(trips);
+    if (!chosen.length) {
+        return '<div class="note-box">Choose one or more trips from the <strong>Trips</strong> drop-down to see an overview.</div>';
+    }
+    const total = combineStats(chosen.map(t => t.stats));
+    const first = chosen.map(t => t.start).sort()[0], last = chosen.map(t => t.end).sort().pop();
+    const title = chosen.length === 1 ? chosen[0].name : `${chosen.length} trips selected`;
+    const sub = chosen.length === 1 && chosen[0].routeName ? `${escapeHtml(chosen[0].routeName)} · ` : '';
+    const official = value => `official ${value.toFixed(1)} km`;
+
+    let basis;
+    if (total.byHotels || total.byRoute) {
+        const unmapped = total.count - total.byHotels - total.byRoute;
+        basis = `Hotel to hotel is measured along the mapped route between your hotels, plus the walk to and from any hotel off the
+            route, estimated at 1.3 times the straight line (${total.byHotels} of ${total.count} stages). `
+            + (total.byRoute ? `The other ${total.byRoute} use the mapped route between the towns, because a hotel's position wasn't available. ` : '')
+            + (unmapped ? `${unmapped} stages have no route data, so they show the official distance. ` : '');
+    } else {
+        basis = 'No route data for this selection, so only the official distances are available. ';
+    }
+
+    const rows = chosen.map(trip => trip.stages.map((stage, index) => `
+        <tr class="clickable" data-goto="${escapeHtml(stageIdOf(stage))}" tabindex="0">
+            <td>${index + 1}</td>
+            <td>${formatDate(stage.date_walked)}</td>
+            <td>${escapeHtml(stage.start_location)} → ${escapeHtml(stage.end_location)}${isQuote(stage) ? ' 📝' : ''}</td>
+            <td class="num">${(stage.actual_distance || 0).toFixed(1)}</td>
+            <td class="num muted">${(stage.standard_distance || 0).toFixed(0)}</td>
+            <td class="num">${stage.ascent_m != null ? Math.round(stage.ascent_m) : '–'}</td>
+        </tr>`).join('')).join('');
+
+    return `
+        <h2>${escapeHtml(title)}</h2>
+        <div class="detail-sub">${sub}${formatDate(first)} – ${formatDate(last)}</div>
+
+        <div class="metrics">
+            ${metric('Distance, hotel to hotel', `${total.actual.toFixed(1)} km`, official(total.official))}
+            ${metric('Stages', total.count)}
+            ${metric('Nights', total.nights)}
+            ${metric('Average per stage', `${total.avgActual.toFixed(1)} km`, official(total.avgOfficial))}
+            ${total.hasClimb ? metric('Ascent', `⬆ ${Math.round(total.ascent)} m`) : ''}
+            ${total.hasClimb ? metric('Descent', `⬇ ${Math.round(total.descent)} m`) : ''}
+        </div>
+        <p class="small">${basis}Official is the distance CaminoWays publishes.</p>
+
+        <div id="overviewRoute"></div>
+
+        ${chosen.length > 1 ? `
+            <section><h4>🧭 Trips</h4>
+                <div class="table-wrap">
+                <table class="days">
+                    <thead><tr><th>Trip</th><th>Dates</th><th class="num">Stages</th><th class="num">Nights</th><th class="num">Hotel to hotel (km)</th><th class="num">Official (km)</th><th class="num">Avg / stage</th></tr></thead>
+                    <tbody>${chosen.map(trip => `
+                        <tr><td>${escapeHtml(trip.name)}${trip.isQuote ? ' 📝' : ''}</td><td>${formatDate(trip.start)} – ${formatDate(trip.end)}</td>
+                            <td class="num">${trip.stats.count}</td><td class="num">${trip.stats.nights}</td>
+                            <td class="num">${trip.stats.actual.toFixed(1)}</td><td class="num muted">${trip.stats.official.toFixed(0)}</td>
+                            <td class="num">${trip.stats.avgActual.toFixed(1)}</td></tr>`).join('')}
+                    </tbody>
+                </table>
+                </div>
+            </section>` : ''}
+
+        <section><h4>📅 Day by day</h4>
+            <div class="table-wrap">
+                <table class="days">
+                    <thead><tr><th>Day</th><th>Date</th><th>Stage</th><th class="num">Hotel to hotel (km)</th><th class="num">Official (km)</th><th class="num">Ascent (m)</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </section>`;
+}
+
 function renderDetail() {
     const pane = $('detailPane');
     destroyMiniView();
-    const stage = currentStage();
-    if (!stage) { pane.innerHTML = ''; return; }
+    const trips = buildTrips();
+    const stage = state.view === 'stage' ? currentStage() : null;
+
+    if (!stage) {
+        pane.innerHTML = `
+            <div class="pane-head"><button class="back-btn" data-back="stages">‹ Stages</button><span>Overview</span></div>
+            <div class="detail-body" id="detailContent">${overviewHtml(trips)}</div>`;
+        const host = $('overviewRoute');
+        if (host) {
+            miniView = new RouteView(host, { height: 300 });
+            miniView.setData(selectedStages(trips), null);
+        }
+        return;
+    }
 
     pane.innerHTML = `
         <div class="pane-head"><button class="back-btn" data-back="stages">‹ Stages</button>
@@ -354,6 +543,7 @@ function renderDetail() {
             miniView = new RouteView(host, { height: 280 });
             miniView.setData([stage], stageIdOf(stage));
         }
+        ensureStopDetails();
     }
 }
 
@@ -395,8 +585,16 @@ function serviceDetailHtml(stage, kind) {
     }).join('');
 }
 
-function metric(label, value) {
-    return `<div class="metric"><div class="metric-value">${value}</div><div class="metric-label">${label}</div></div>`;
+function metric(label, value, sub) {
+    return `<div class="metric"><div class="metric-value">${value}</div>${sub ? `<div class="metric-sub">${sub}</div>` : ''}<div class="metric-label">${label}</div></div>`;
+}
+
+// A hotel well off the route makes the day longer than the published distance
+function detourNote(stage) {
+    const parts = [];
+    if (stage.start_hotel_detour_km >= 0.5) parts.push(`${escapeHtml(stage.start_hotel || 'your starting hotel')} is about ${stage.start_hotel_detour_km.toFixed(1)} km off the route`);
+    if (stage.end_hotel_detour_km >= 0.5) parts.push(`${escapeHtml(stage.end_hotel || 'your hotel tonight')} is about ${stage.end_hotel_detour_km.toFixed(1)} km off the route`);
+    return parts.length ? `<div class="note-box">🏨 ${parts.join(', and ')}, which is included in the hotel-to-hotel distance (estimated).</div>` : '';
 }
 
 // General: what we know about the stage from public route data
@@ -405,15 +603,20 @@ function generalHtml(stage) {
     const hasClimb = stage.ascent_m != null;
     const lunches = stage.lunch_stops || [];
     const places = stage.places_passed || [];
-    const total = stage.standard_distance || stage.actual_distance || 0;
+    const official = stage.standard_distance || 0;
+    const actual = stage.actual_distance || official;
+    const distanceLabel = stage.actual_basis === 'hotels' ? 'Distance, hotel to hotel'
+        : stage.actual_basis === 'route' ? 'Distance along the route' : 'Distance';
 
     return `
         <div class="metrics">
-            ${metric('Distance', `${total.toFixed(1)} km`)}
+            ${metric(distanceLabel, `${actual.toFixed(1)} km`, `official ${official.toFixed(1)} km`)}
             ${hasClimb ? metric('Ascent', `⬆ ${Math.round(stage.ascent_m)} m`) : ''}
             ${hasClimb ? metric('Descent', `⬇ ${Math.round(stage.descent_m)} m`) : ''}
             ${stage.difficulty ? metric('Difficulty', difficultyBadge(stage)) : ''}
         </div>
+
+        ${detourNote(stage)}
 
         ${hasRoute ? '<div id="miniRoute"></div>' : `
             <div class="note-box">No route data for this trip yet. Maps, height profiles, climb and lunch stops are available for the
@@ -436,17 +639,8 @@ function generalHtml(stage) {
 
         ${lunches.length ? `
             <section><h4>🍴 Lunch stops</h4>
-                <div class="lunch-list">
-                    ${lunches.map(stop => `
-                        <div class="lunch">
-                            <span>${FOOD_ICONS[stop.kind] || '🍴'} <strong>${escapeHtml(stop.name)}</strong>
-                                <span class="muted">(${escapeHtml(stop.kind)}${stop.off_m > 50 ? `, ${stop.off_m} m off route` : ''})</span>
-                                ${stop.hours ? `<br><small class="muted">🕒 ${escapeHtml(stop.hours)}</small>` : ''}
-                            </span>
-                            <span class="muted nowrap">km ${stop.km.toFixed(1)} of ${total.toFixed(0)}</span>
-                        </div>`).join('')}
-                </div>
-                <p class="small">From OpenStreetMap, so opening times and closures aren't guaranteed. Check ahead, and carry water and a snack.</p>
+                <div class="lunch-list" id="lunchList">${lunchListHtml(stage)}</div>
+                <p class="small">Click a stop, or its dot on the map or height profile, for details. From OpenStreetMap, so opening times and closures aren't guaranteed. Check ahead, and carry water and a snack.</p>
             </section>` : ''}`;
 }
 
@@ -524,6 +718,173 @@ function caminowaysHtml(stage) {
 }
 
 // ----------------------------------------------------------------------
+// Lunch stops: a dot on the maps and height profile, and a row in the stage. Click either for details.
+// ----------------------------------------------------------------------
+
+const stopDetails = new Map();   // stop key -> details from /api/place, 'loading' or 'error'
+
+function stopKey(stop) {
+    return `${stop.lat},${stop.lon}`;
+}
+
+function findStop(key) {
+    for (const stage of state.stages) {
+        const stop = (stage.lunch_stops || []).find(s => s.lat != null && stopKey(s) === key);
+        if (stop) return { stop, stage };
+    }
+    return null;
+}
+
+// Height along a stage's profile ([km, metres] points) at a distance from its start
+function heightAt(profile, km) {
+    if (!profile || !profile.length) return null;
+    if (km <= profile[0][0]) return profile[0][1];
+    for (let i = 1; i < profile.length; i++) {
+        if (km <= profile[i][0]) {
+            const [x0, y0] = profile[i - 1], [x1, y1] = profile[i];
+            return x1 === x0 ? y1 : y0 + (y1 - y0) * (km - x0) / (x1 - x0);
+        }
+    }
+    return profile[profile.length - 1][1];
+}
+
+function stopStyle(selected) {
+    return selected
+        ? { radius: 10, color: '#fff', weight: 3, fillColor: '#d81b60', fillOpacity: 1, bubblingMouseEvents: false }
+        : { radius: 7, color: '#5d4037', weight: 2, fillColor: '#ffb300', fillOpacity: 1, bubblingMouseEvents: false };
+}
+
+function phoneLink(phone) {
+    const digits = (phone || '').replace(/[^\d+]/g, '');
+    return digits ? `<a href="tel:${digits}">${escapeHtml(phone)}</a>` : '';
+}
+
+// Everything we can say about one stop, as far as it has loaded
+function stopCardHtml(stop, stage) {
+    const key = stopKey(stop);
+    const details = stopDetails.get(key);
+    const loaded = details && typeof details === 'object' ? details : null;
+    const total = stage ? (stage.actual_distance || stage.standard_distance || 0) : 0;
+    const hours = (loaded && loaded.hours) || stop.hours;
+    const links = (loaded && loaded.links) || {
+        google_maps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${stop.name} ${stop.lat},${stop.lon}`)}`,
+        tripadvisor: `https://www.tripadvisor.com/Search?q=${encodeURIComponent(stop.name)}`
+    };
+    const link = (url, label) => safeUrl(url) ? `<a href="${escapeHtml(safeUrl(url))}" target="_blank" rel="noopener noreferrer">${label} ↗</a>` : '';
+    const row = (icon, html) => html ? `<div>${icon} ${html}</div>` : '';
+
+    let status = '';
+    if (details === 'loading' || !details) status = '<div class="muted small">Loading more details…</div>';
+    else if (details === 'error') status = `<div class="muted small">Couldn't load more details just now. <button type="button" class="linkish" data-retry="${key}">Try again</button></div>`;
+    else if (loaded.lookup_failed) status = `<div class="muted small">The map data service is busy, so this is what we already had. <button type="button" class="linkish" data-retry="${key}">Try again</button></div>`;
+    else if (!loaded.found_in_osm) status = '<div class="muted small">OpenStreetMap has no more details for this place.</div>';
+
+    let reviews;
+    const g = loaded && loaded.google_rating;
+    if (g && g.rating != null) {
+        reviews = `
+            <div class="stop-reviews">
+                <div><strong>★ ${Number(g.rating).toFixed(1)}</strong> <span class="muted">${g.count ? `(${g.count} reviews on Google)` : 'on Google'}</span></div>
+                ${(g.reviews || []).filter(r => r.text).map(r => `
+                    <blockquote>
+                        <span class="muted">${'★'.repeat(Math.round(r.rating || 0))}</span> ${escapeHtml(r.text)}
+                        <footer class="small">${escapeHtml(r.author || 'A visitor')}${r.when ? `, ${escapeHtml(r.when)}` : ''}</footer>
+                    </blockquote>`).join('')}
+                <div class="small">Ratings and reviews from Google.</div>
+            </div>`;
+    } else {
+        reviews = `<div class="small muted">Reviews: none are stored here. Read them on the links below.</div>`;
+    }
+
+    return `
+        <div class="stop-head">
+            <span>${FOOD_ICONS[stop.kind] || '🍴'} <strong>${escapeHtml(stop.name)}</strong> <span class="muted">${escapeHtml(stop.kind)}</span></span>
+            <button type="button" class="linkish" data-stop-close aria-label="Close details">✕</button>
+        </div>
+        <div class="muted small">km ${stop.km.toFixed(1)}${total ? ` of ${total.toFixed(0)}` : ''}${stop.off_m > 50 ? ` · ${stop.off_m} m off the route` : ' · on the route'}</div>
+        ${row('📍', loaded && loaded.address ? escapeHtml(loaded.address) : '')}
+        ${row('🕒', hours ? escapeHtml(hours) : '')}
+        ${row('🍽️', loaded && loaded.cuisine ? escapeHtml(loaded.cuisine) : '')}
+        ${row('📞', loaded ? phoneLink(loaded.phone) : '')}
+        ${row('🌐', loaded ? link(loaded.website, 'Website') : '')}
+        ${loaded && loaded.wheelchair ? row('♿', `Wheelchair access: ${escapeHtml(loaded.wheelchair)}`) : ''}
+        ${status}
+        ${reviews}
+        <div class="stop-links">${link(links.google_maps, 'Google Maps')} ${link(links.tripadvisor, 'TripAdvisor')} ${loaded ? link(loaded.osm_url, 'OpenStreetMap') : ''}</div>
+        <div class="small muted">Opening times and closures aren't guaranteed. Check ahead.</div>`;
+}
+
+function lunchListHtml(stage) {
+    const total = stage.actual_distance || stage.standard_distance || 0;
+    return (stage.lunch_stops || []).map(stop => {
+        const clickable = stop.lat != null;
+        const key = clickable ? stopKey(stop) : null;
+        const open = clickable && state.stopKey === key;
+        const label = `${FOOD_ICONS[stop.kind] || '🍴'} <strong>${escapeHtml(stop.name)}</strong>
+            <span class="muted">(${escapeHtml(stop.kind)}${stop.off_m > 50 ? `, ${stop.off_m} m off route` : ''})</span>
+            ${stop.hours ? `<br><small class="muted">🕒 ${escapeHtml(stop.hours)}</small>` : ''}`;
+        if (!clickable) return `<div class="lunch-item"><div class="lunch"><span>${label}</span><span class="muted nowrap">km ${stop.km.toFixed(1)} of ${total.toFixed(0)}</span></div></div>`;
+        return `
+            <div class="lunch-item ${open ? 'open' : ''}" data-lunch="${key}">
+                <button type="button" class="lunch" data-stop="${key}" aria-expanded="${open}">
+                    <span>${label}</span>
+                    <span class="muted nowrap">km ${stop.km.toFixed(1)} of ${total.toFixed(0)} ${open ? '▾' : '▸'}</span>
+                </button>
+                ${open ? `<div class="stop-card" data-stop-body="${key}">${stopCardHtml(stop, stage)}</div>` : ''}
+            </div>`;
+    }).join('');
+}
+
+// Fetch details for the selected stop (once), then update every place that shows them
+async function ensureStopDetails(force) {
+    const key = state.stopKey;
+    const found = key && findStop(key);
+    if (!found) return;
+    const current = stopDetails.get(key);
+    if (!force && (current === 'loading' || (current && current !== 'error'))) return;
+
+    stopDetails.set(key, 'loading');
+    renderStopBodies();
+    try {
+        const params = new URLSearchParams({ name: found.stop.name, kind: found.stop.kind || '', lat: found.stop.lat, lon: found.stop.lon });
+        const response = await fetch(`/api/place?${params}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const details = await response.json();
+        // A busy map service is worth another try later, so don't keep that result
+        stopDetails.set(key, details);
+        if (details.lookup_failed) setTimeout(() => { if (stopDetails.get(key) === details) stopDetails.delete(key); }, 30000);
+    } catch (error) {
+        console.error('Could not load stop details:', error);
+        stopDetails.set(key, 'error');
+    }
+    renderStopBodies();
+}
+
+function renderStopBodies() {
+    document.querySelectorAll('[data-stop-body]').forEach(el => {
+        const found = findStop(el.dataset.stopBody);
+        if (found) el.innerHTML = stopCardHtml(found.stop, found.stage);
+    });
+    views.forEach(view => view.renderStopPanel());
+}
+
+// Select a stop (or clear it). `toggle` closes it when it's already open, as the list rows do.
+function selectStop(key, { toggle = false, reveal = false } = {}) {
+    state.stopKey = toggle && state.stopKey === key ? null : key;
+
+    const stage = currentStage();
+    const list = $('lunchList');
+    if (list && stage) list.innerHTML = lunchListHtml(stage);
+    views.forEach(view => view.markStop());
+    ensureStopDetails();
+
+    if (reveal && state.stopKey) {
+        const item = document.querySelector(`[data-lunch="${state.stopKey}"]`);
+        if (item) item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+// ----------------------------------------------------------------------
 // Route view: map or height profile, with the user's location overlaid
 // ----------------------------------------------------------------------
 
@@ -548,11 +909,14 @@ class RouteView {
                 <div class="rv-map"></div>
                 <div class="rv-chart hidden"><canvas></canvas></div>
                 <div class="rv-empty hidden"></div>
-            </div>`;
+            </div>
+            <div class="rv-stop stop-card hidden"></div>`;
         this.mapEl = host.querySelector('.rv-map');
         this.chartEl = host.querySelector('.rv-chart');
         this.emptyEl = host.querySelector('.rv-empty');
         this.noteEl = host.querySelector('.rv-note');
+        this.stopEl = host.querySelector('.rv-stop');
+        this.stops = [];
         this.stages = [];
         this.map = null;
         this.chart = null;
@@ -572,11 +936,16 @@ class RouteView {
         this.track = [];       // every point along the route with its distance from the start
         this.points = [];      // height profile {x: km, y: metres}
         this.boundaries = [];  // where each stage starts and ends along the x axis
+        this.stops = [];       // lunch stops, placed along the same x axis
 
         let offset = 0;
         this.stages.forEach(stage => {
             const profile = stage.elevation_profile || [];
             const boundary = { id: stageIdOf(stage), start: offset, end: offset };
+            (stage.lunch_stops || []).forEach(stop => {
+                if (stop.lat == null) return;
+                this.stops.push({ key: stopKey(stop), stop, stage, x: offset + stop.km, y: heightAt(profile, stop.km) });
+            });
             stage.route_path.forEach((point, k) => {
                 const km = profile[k] ? profile[k][0] : (k / (stage.route_path.length - 1)) * (stage.standard_distance || 0);
                 this.track.push({ lat: point[0], lon: point[1], x: offset + km, y: profile[k] ? profile[k][1] : null });
@@ -586,6 +955,8 @@ class RouteView {
             boundary.end = offset;
             this.boundaries.push(boundary);
         });
+        this.stopPoints = this.stops.filter(item => item.y != null)
+            .map(item => ({ x: item.x, y: item.y, key: item.key, name: item.stop.name, kind: item.stop.kind }));
         this.render(true);
     }
 
@@ -612,6 +983,7 @@ class RouteView {
             this.renderChart();
         }
         this.updateNote();
+        this.renderStopPanel();
     }
 
     renderMap(fit) {
@@ -653,6 +1025,28 @@ class RouteView {
                     .bindTooltip(escapeHtml(stage.start_location), { permanent: !several, direction: 'top', offset: [0, -6] })
                     .addTo(this.routeLayer);
             }
+        });
+
+        // Hotels (where known), then the lunch dots on top
+        this.markers = new Map();
+        const hotelsShown = new Set();
+        this.stages.forEach(stage => {
+            const cw = stage.caminoways || {};
+            [['start', cw.start_hotel], ['end', cw.end_hotel]].forEach(([which, hotel]) => {
+                const lat = stage[`${which}_hotel_lat`], lon = stage[`${which}_hotel_lon`];
+                if (lat == null || hotelsShown.has(`${lat},${lon}`)) return;
+                hotelsShown.add(`${lat},${lon}`);
+                L.marker([lat, lon], { icon: L.divIcon({ className: 'hotel-dot', html: '🏨', iconSize: [22, 22] }), keyboard: false })
+                    .bindTooltip(escapeHtml((hotel && hotel.name) || stage[`${which}_hotel`] || 'Hotel'), { direction: 'top', offset: [0, -8] })
+                    .addTo(this.routeLayer);
+            });
+        });
+        this.stops.forEach(item => {
+            const marker = L.circleMarker([item.stop.lat, item.stop.lon], stopStyle(item.key === state.stopKey))
+                .bindTooltip(`${FOOD_ICONS[item.stop.kind] || '🍴'} ${escapeHtml(item.stop.name)}`, { direction: 'top', offset: [0, -8] })
+                .on('click', () => selectStop(item.key, { reveal: true }))
+                .addTo(this.routeLayer);
+            this.markers.set(item.key, marker);
         });
 
         this.drawUser();
@@ -734,12 +1128,32 @@ class RouteView {
                 pointRadius: 0,
                 borderWidth: 2,
                 tension: 0.15
+            }, {
+                // Lunch stops: clickable dots on the profile
+                type: 'line',
+                data: this.stopPoints,
+                parsing: false,
+                showLine: false,
+                borderWidth: 2,
+                borderColor: '#5d4037',
+                backgroundColor: ctx => ctx.raw && ctx.raw.key === state.stopKey ? '#d81b60' : '#ffb300',
+                pointRadius: ctx => ctx.raw && ctx.raw.key === state.stopKey ? 10 : 7,
+                pointHoverRadius: 10,
+                pointHitRadius: 10
             }] },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 animation: false,
                 interaction: { mode: 'nearest', axis: 'x', intersect: false },
+                onClick: (event, active, chart) => {
+                    const hit = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, true).find(e => e.datasetIndex === 1);
+                    if (hit && this.stopPoints[hit.index]) selectStop(this.stopPoints[hit.index].key, { reveal: true });
+                },
+                onHover: (event, active, chart) => {
+                    const hit = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, true).some(e => e.datasetIndex === 1);
+                    chart.canvas.style.cursor = hit ? 'pointer' : 'default';
+                },
                 scales: {
                     x: { type: 'linear', title: { display: true, text: 'Distance (km)' }, min: 0, max: this.points.length ? this.points[this.points.length - 1].x : 1 },
                     y: { title: { display: true, text: 'Height (m)' } }
@@ -748,12 +1162,35 @@ class RouteView {
                     legend: { display: false },
                     tooltip: { callbacks: {
                         title: items => `km ${items[0].parsed.x.toFixed(1)}`,
-                        label: item => `${Math.round(item.parsed.y)} m`
+                        label: item => {
+                            const stop = item.datasetIndex === 1 ? view.stopPoints[item.dataIndex] : null;
+                            return stop ? `${FOOD_ICONS[stop.kind] || '🍴'} ${stop.name} · ${Math.round(item.parsed.y)} m` : `${Math.round(item.parsed.y)} m`;
+                        }
                     } }
                 }
             },
             plugins: [overlay]
         });
+    }
+
+    // The selected lunch stop changed: restyle the dots and show its details under the map / profile
+    markStop() {
+        if (this.markers) {
+            this.markers.forEach((marker, key) => {
+                const selected = key === state.stopKey;
+                marker.setStyle(stopStyle(selected));
+                marker.setRadius(stopStyle(selected).radius);
+                if (selected) marker.bringToFront();
+            });
+        }
+        if (this.chart) this.chart.update('none');
+        this.renderStopPanel();
+    }
+
+    renderStopPanel() {
+        const item = state.stopKey && this.stops.find(s => s.key === state.stopKey);
+        this.stopEl.classList.toggle('hidden', !item);
+        if (item) this.stopEl.innerHTML = stopCardHtml(item.stop, item.stage);
     }
 
     // Where the user is along this route (nearest route point), and how far off it
@@ -860,12 +1297,14 @@ function renderMapTab() {
         mapTabView = new RouteView(host, { height: Math.max(420, window.innerHeight - 360) });
     }
 
-    const trip = currentTrip(buildTrips());
-    const stage = currentStage();
-    const stages = state.mapScope === 'stage' && stage ? [stage] : (trip ? trip.stages : []);
+    const trips = buildTrips();
+    const chosen = selectedTrips(trips);
+    const stage = state.view === 'stage' ? currentStage() : null;
+    const onlyStage = state.mapScope === 'stage' && stage;
     $('mapScope').value = state.mapScope;
-    $('mapTitle').textContent = state.mapScope === 'stage' && stage ? stage.name : (trip ? trip.name : '');
-    mapTabView.setData(stages, stage ? stageIdOf(stage) : null);
+    $('mapTitle').textContent = onlyStage ? stage.name
+        : chosen.length === 1 ? chosen[0].name : chosen.length ? `${chosen.length} trips` : 'No trips selected';
+    mapTabView.setData(onlyStage ? [stage] : selectedStages(trips), stage ? stageIdOf(stage) : null);
 }
 
 // ----------------------------------------------------------------------
@@ -893,6 +1332,43 @@ function setupEventListeners() {
         refreshAll();
     });
     $('mapScope').addEventListener('change', e => { state.mapScope = e.target.value; renderMapTab(); });
+
+    // Trip drop-down: several trips can be ticked at once
+    const picker = $('tripPicker');
+    picker.addEventListener('click', e => {
+        if (e.target.closest('#tripPickerBtn')) {
+            state.tripMenuOpen = !state.tripMenuOpen;
+            renderTripPicker(buildTrips());
+            return;
+        }
+        const action = e.target.closest('[data-picker]');
+        if (action) setTripKeys(action.dataset.picker === 'all' ? buildTrips().map(t => t.key) : []);
+    });
+    picker.addEventListener('change', e => {
+        if (!e.target.matches('[data-trip]')) return;
+        const trips = buildTrips();
+        setTripKeys([...picker.querySelectorAll('[data-trip]')].filter(box => box.checked).map(box => trips[Number(box.dataset.trip)].key));
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && state.tripMenuOpen) { state.tripMenuOpen = false; renderTripPicker(buildTrips()); }
+        const row = e.target.closest && e.target.closest('tr[data-goto]');
+        if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); selectStageById(row.dataset.goto, 'detail'); }
+    });
+
+    // Clicks on lunch stops, retry links and overview rows. Delegated, because the panels are redrawn often.
+    document.addEventListener('click', e => {
+        if (state.tripMenuOpen && !e.composedPath().includes(picker)) {
+            state.tripMenuOpen = false;
+            renderTripPicker(buildTrips());
+        }
+        const stop = e.target.closest('[data-stop]');
+        if (stop) { selectStop(stop.dataset.stop, { toggle: true }); return; }
+        if (e.target.closest('[data-stop-close]')) { selectStop(null); return; }
+        const retry = e.target.closest('[data-retry]');
+        if (retry) { state.stopKey = retry.dataset.retry; ensureStopDetails(true); return; }
+        const row = e.target.closest('tr[data-goto]');
+        if (row) selectStageById(row.dataset.goto, 'detail');
+    });
 
     // "‹ Trips" / "‹ Stages" buttons for narrow screens, where one column shows at a time
     $('mail').addEventListener('click', e => {
@@ -983,9 +1459,11 @@ async function runSync(modal) {
             state.showQuotes = true;  // they asked for quotes, so show what came back
             writePref(SHOW_QUOTES_KEY, true);
         }
-        state.tripKey = null;
+        state.tripKeys = null;   // start from the next trip to walk
         state.stageId = null;
-        state.pane = 'trips';
+        state.view = 'overview';
+        state.stopKey = null;
+        state.pane = 'stages';
         saveStages();
         refreshAll();
         modal.remove();
@@ -1005,8 +1483,9 @@ function clearData() {
             console.error('Could not clear saved stages:', error);
         }
         state.stages = [];
-        state.tripKey = null;
+        state.tripKeys = null;
         state.stageId = null;
+        state.view = 'overview';
         refreshAll();
     }
 }

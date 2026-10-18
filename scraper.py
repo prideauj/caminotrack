@@ -1,4 +1,6 @@
+import asyncio
 import httpx
+from urllib.parse import unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 from datetime import datetime, date
 from models import Stage
@@ -13,6 +15,9 @@ DATE_RE = r"\d{1,2}\s+[A-Za-z]+\s+\d{4}"
 DATE_RANGE_RE = re.compile(rf"({DATE_RE})\s+To\s+({DATE_RE})")
 DISTANCE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*km", re.I)
 BOOKING_LINK_RE = re.compile(r"/booking/(\d+)")
+MAP_LINK_HOSTS = {"goo.gl", "maps.app.goo.gl", "g.page", "www.google.com", "google.com", "maps.google.com"}
+PLACE_COORDS_RE = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")  # the place itself
+VIEW_COORDS_RE = re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)")        # where the map is centred
 
 
 class LoginError(Exception):
@@ -53,8 +58,118 @@ class CaminoScraper:
                     logger.error(f"✗ Error processing booking {booking_id}: {e}", exc_info=True)
                     continue
 
+        await self._add_hotel_positions(stages)
+        await self._geocode_missing_hotels(stages)
         logger.info(f"Total stages extracted: {len(stages)}")
         return stages
+
+    @staticmethod
+    def _coords_from_map_url(url: str) -> Optional[tuple]:
+        url = unquote(url)
+        match = PLACE_COORDS_RE.search(url) or VIEW_COORDS_RE.search(url)
+        return (float(match.group(1)), float(match.group(2))) if match else None
+
+    async def _add_hotel_positions(self, stages: List[Stage]):
+        """The hotels' map links are Google short links that redirect to a page naming the place's coordinates.
+        Read that redirect (without following it) to get each hotel's position, for hotel-to-hotel distances."""
+        urls = {h["map_url"] for st in stages for h in ((st.caminoways or {}).get("start_hotel"), (st.caminoways or {}).get("end_hotel"))
+                if h and h.get("map_url") and urlparse(h["map_url"]).hostname in MAP_LINK_HOSTS and urlparse(h["map_url"]).scheme == "https"}
+        if not urls:
+            return
+        positions = {}
+        slots = asyncio.Semaphore(6)
+
+        async def resolve(client: httpx.AsyncClient, url: str):
+            async with slots:
+                try:
+                    direct = self._coords_from_map_url(url)
+                    if direct:
+                        positions[url] = direct
+                        return
+                    # Follow the short link by hand, so it can only lead to Google's own hosts, and stop at the
+                    # first address that names the coordinates
+                    hop = url
+                    for _ in range(4):
+                        response = await client.get(hop, follow_redirects=False)
+                        hop = urljoin(hop, response.headers.get("location", ""))
+                        found = self._coords_from_map_url(hop)
+                        if found:
+                            positions[url] = found
+                            break
+                        if not response.is_redirect or urlparse(hop).hostname not in MAP_LINK_HOSTS:
+                            break
+                except Exception as e:  # a hotel without a position just falls back to its town
+                    logger.warning(f"Could not read hotel position from {url}: {e}")
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
+        async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+            await asyncio.gather(*(resolve(client, url) for url in urls))
+        logger.info(f"Found positions for {len(positions)} of {len(urls)} hotels")
+
+        for stage in stages:
+            for which in ("start", "end"):
+                hotel = (stage.caminoways or {}).get(f"{which}_hotel")
+                point = positions.get(hotel["map_url"]) if hotel and hotel.get("map_url") else None
+                if point:
+                    hotel["lat"], hotel["lon"] = point
+                    setattr(stage, f"{which}_hotel_lat", point[0])
+                    setattr(stage, f"{which}_hotel_lon", point[1])
+
+    @staticmethod
+    def _address_queries(hotel: dict, town: str) -> List[str]:
+        """Addresses to try for a hotel, most exact first. Nominatim is picky, so also try simpler forms."""
+        address = re.sub(r"\b(\d{4,5})\b(?:[\s,]+\1\b)+", r"\1", hotel.get("address") or "")
+        address = re.sub(r"\s{2,}", " ", address)
+        address = re.sub(r"(,\s*)+", ", ", address).strip(", ")
+        parts = [p.strip() for p in address.split(",") if p.strip()]
+        country = parts[-1] if parts else ""
+        street = re.sub(r"\s+\d+[A-Za-z]?\s*$", "", parts[0]) if parts else ""
+        name = re.sub(r"\s*\d\*|\s+-\s+.*$|\s*-\s*\w+$", "", hotel.get("name") or "").strip()
+        # Spanish addresses often leave out "Calle"; and the street without its number is a fair fix on the hotel
+        with_type = street if re.match(r"(calle|c/|plaza|plaça|praza|avenida|avda|paseo|via|viale|piazza|rua|rúa|camino)\b", street, re.I) else f"Calle {street}"
+        queries = [address, f"{street}, {town}, {country}", f"{with_type}, {town}, {country}",
+                   f"{name}, {town}, {country}", f"{name}, {town}"]
+        return list(dict.fromkeys(q for q in queries if len(q.strip(" ,")) > 3))
+
+    async def _geocode_missing_hotels(self, stages: List[Stage]):
+        """Hotels whose map link gave no position (some are Google 'g.page' links that only name a place ID):
+        find them from their address instead. Nominatim allows one request a second."""
+        todo = {}
+        for stage in stages:
+            for which, town in (("start", stage.start_location), ("end", stage.end_location)):
+                hotel = (stage.caminoways or {}).get(f"{which}_hotel")
+                if hotel and hotel.get("lat") is None and (hotel.get("address") or hotel.get("name")):
+                    todo.setdefault((hotel.get("name"), hotel.get("address")), (hotel, town))
+        if not todo:
+            return
+
+        found = {}
+        headers = {"User-Agent": "CaminoTrack/1.0 (https://github.com/prideauj/caminotrack)"}
+        async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+            for key, (hotel, town) in todo.items():
+                for query in self._address_queries(hotel, town):
+                    try:
+                        response = await client.get("https://nominatim.openstreetmap.org/search",
+                                                    params={"q": query, "format": "json", "limit": 1})
+                        results = response.json() if response.status_code == 200 else []
+                    except Exception as e:
+                        logger.warning(f"Address lookup failed for '{query}': {e}")
+                        results = []
+                    await asyncio.sleep(1.1)
+                    if results:
+                        found[key] = (float(results[0]["lat"]), float(results[0]["lon"]))
+                        break
+        logger.info(f"Found positions for {len(found)} of {len(todo)} hotels from their addresses")
+
+        for stage in stages:
+            for which in ("start", "end"):
+                hotel = (stage.caminoways or {}).get(f"{which}_hotel")
+                point = found.get((hotel.get("name"), hotel.get("address"))) if hotel else None
+                if point and hotel.get("lat") is None:
+                    hotel["lat"], hotel["lon"] = point
+                    hotel["position_from"] = "address"
+                    setattr(stage, f"{which}_hotel_lat", point[0])
+                    setattr(stage, f"{which}_hotel_lon", point[1])
 
     async def _list_booking_ids(self, client: httpx.AsyncClient, path: str, max_pages: int = 20) -> List[str]:
         """Booking numbers on one of the portal's lists (confirmed, quotes, ...), following its pages"""

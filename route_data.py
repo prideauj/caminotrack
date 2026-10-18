@@ -559,6 +559,26 @@ def snap_trip(route: dict, points: List[Tuple[float, float]], leg_km: List[float
     return positions
 
 
+MAX_HOTEL_OFF_ROUTE_KM = 20.0  # a hotel further than this from the route is more likely a bad position than a long walk
+MAX_HOTEL_SHIFT_KM = 10.0      # ...as is one whose nearest route point is this far along from its town
+DETOUR_FACTOR = 1.3            # roads to an off-route hotel are longer than the straight line
+
+
+def hotel_on_route(route: dict, lat, lon, expected_km: float) -> Optional[Tuple[float, float]]:
+    """(km along the route, km off it) for a hotel, taken at the route position nearest to where its town is.
+    None if the hotel has no position or isn't near the route."""
+    if lat is None or lon is None:
+        return None
+    point = (lat, lon)
+    # Only route points about as close as the nearest: further ones would count a detour the hotel doesn't need
+    km = min(candidate_positions(route, point, slack_km=0.25), key=lambda k: abs(k - expected_km))
+    index = min(round(km / route["step_km"]), len(route["lat"]) - 1)
+    off = haversine_km((route["lat"][index], route["lon"][index]), point)
+    if off > MAX_HOTEL_OFF_ROUTE_KM or abs(km - expected_km) > MAX_HOTEL_SHIFT_KM:
+        return None
+    return km, off
+
+
 def stage_geometry(route: dict, start_km: float, end_km: float, spacing_km: float = 0.3) -> Tuple[List[list], List[list]]:
     """Path ([lat, lon]) and height profile ([km from the stage start, metres]) for the part of the route walked,
     in walking order, thinned to roughly one point per `spacing_km`"""
@@ -654,7 +674,10 @@ def stage_summary(stage, route: dict, start_km: float, end_km: float, ascent: fl
     low, high = sorted((start_km, end_km))
     step = route["step_km"]
     profile = route["elevation"][round(low / step):round(high / step) + 1]
-    parts = [f"{stage.start_location} to {stage.end_location}: {stage.standard_distance:g} km with about "
+    distance = f"{stage.standard_distance:g} km"
+    if stage.actual_basis == "hotels" and abs(stage.actual_distance - stage.standard_distance) >= 0.5:
+        distance += f" ({stage.actual_distance:.1f} km hotel to hotel)"
+    parts = [f"{stage.start_location} to {stage.end_location}: {distance} with about "
              f"{round(ascent)} m of climbing and {round(descent)} m of descent."]
     if stage.difficulty:
         parts.append(f"{stage.difficulty} for this route (harder than {round(stage.difficulty_percentile)}% of similar stretches).")
@@ -745,8 +768,23 @@ def _enrich_trip(trip_stages: list, data: dict):
 
     for position, stage in enumerate(ordered):
         start_km, end_km = km_at[position], km_at[position + 1]
-        ascent, descent = climb_between(route, start_km, end_km)
+        # Hotel to hotel where we know where they are: the stage runs between the hotels, and each hotel's
+        # distance off the route (there and back is counted by the neighbouring stage) is walked too
+        start_hotel = hotel_on_route(route, stage.start_hotel_lat, stage.start_hotel_lon, start_km)
+        end_hotel = hotel_on_route(route, stage.end_hotel_lat, stage.end_hotel_lon, end_km)
+        if start_hotel:
+            start_km = start_hotel[0]
+        if end_hotel:
+            end_km = end_hotel[0]
         route_distance = abs(end_km - start_km)
+        # Leaving the route for a hotel, and rejoining it, is walked too (the stage before or after counts the other half)
+        start_detour = DETOUR_FACTOR * start_hotel[1] if start_hotel else 0.0
+        end_detour = DETOUR_FACTOR * end_hotel[1] if end_hotel else 0.0
+        stage.actual_distance = round(route_distance + start_detour + end_detour, 1)
+        stage.start_hotel_detour_km = round(start_detour, 1)
+        stage.end_hotel_detour_km = round(end_detour, 1)
+        stage.actual_basis = "hotels" if start_hotel and end_hotel else "route"
+        ascent, descent = climb_between(route, start_km, end_km)
         stage.route_name = route["name"]
         stage.ascent_m = round(ascent)
         stage.descent_m = round(descent)

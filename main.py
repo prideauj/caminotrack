@@ -6,13 +6,14 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from scraper import CaminoScraper, LoginError
 from route_data import enrich_stages
+from places import place_details
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -63,6 +64,25 @@ async def serve_root():
 @app.get("/healthz")
 async def health():
     return {"ok": True}
+
+
+PLACE_LOOKUPS_PER_WINDOW = 60  # per client IP
+_recent_places = defaultdict(deque)
+
+
+@app.get("/api/place")
+async def place(request: Request, name: str = Query(..., min_length=1, max_length=120),
+                kind: str = Query("", max_length=30), lat: float = Query(..., ge=-90, le=90),
+                lon: float = Query(..., ge=-180, le=180)):
+    """Details for a lunch stop (address, hours, links, and reviews when configured)"""
+    now = time.monotonic()
+    attempts = _recent_places[_client_ip(request)]
+    while attempts and now - attempts[0] > WINDOW_SECONDS:
+        attempts.popleft()
+    if len(attempts) >= PLACE_LOOKUPS_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many lookups. Please wait a few minutes.")
+    attempts.append(now)
+    return JSONResponse(await place_details(name, kind, lat, lon), headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.post("/api/sync")

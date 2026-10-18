@@ -375,10 +375,10 @@
             to { transform: rotate(360deg); }
         }
 
-        /* ---- Itinerary: trips | stages | details ---- */
+        /* ---- Itinerary: stages | details ---- */
         .mail {
             display: grid;
-            grid-template-columns: 270px 330px minmax(0, 1fr);
+            grid-template-columns: 360px minmax(0, 1fr);
             background: white;
             border: 1px solid var(--border);
             border-radius: 8px;
@@ -475,6 +475,58 @@
         .list-item.quote:hover { background: #f5ebf9; }
         .list-item.quote.selected { background: #f1e4f7; border-left-color: #8e24aa; }
 
+        .stat-card .sub { font-size: 0.8rem; color: #888; margin-top: 0.15rem; }
+
+        /* Trip drop-down */
+        .picker { position: relative; }
+        .picker-btn { background: white; color: var(--primary); border: 1px solid var(--secondary); padding: 0.35rem 0.8rem; max-width: 100%; display: inline-flex; align-items: center; gap: 0.4rem; }
+        .picker-btn:hover { background: #fbeee0; }
+        .picker-label { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .picker-menu { position: absolute; z-index: 1500; top: calc(100% + 4px); left: 0; width: 420px; max-height: 60vh; overflow-y: auto;
+                       background: white; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.2); padding: 0.4rem; }
+        .picker-actions { display: flex; gap: 0.5rem; padding: 0.2rem 0.4rem 0.5rem; border-bottom: 1px solid #eee; margin-bottom: 0.3rem; }
+        .picker-actions button { background: none; color: var(--primary); padding: 0.15rem 0.5rem; font-size: 0.85rem; border: 1px solid var(--border); }
+        .picker-actions button:hover { background: #fbeee0; }
+        .picker-row { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.45rem 0.4rem; border-radius: 6px; cursor: pointer; }
+        .picker-row:hover { background: #fdf8f3; }
+        .picker-row input { margin-top: 0.25rem; }
+        .picker-name { display: block; font-weight: 600; }
+        .picker-sub { display: block; font-size: 0.8rem; color: #777; }
+
+        .pane-empty { padding: 1.2rem 1rem; color: #777; }
+        .list-item.overview { background: #faf6f1; }
+        .list-item.overview.selected { background: #fbeee0; }
+        .trip-head { position: sticky; top: 2.6rem; z-index: 1; background: #f3ece4; padding: 0.4rem 1rem; font-weight: 600; color: var(--primary); border-bottom: 1px solid var(--border); }
+        .trip-head.quote { background: #f1e4f7; }
+        .trip-head .item-sub { font-weight: 400; margin-left: 0.4rem; }
+
+        .metric-sub { font-size: 0.75rem; color: #777; margin-top: -0.1rem; }
+
+        .table-wrap { overflow-x: auto; }
+        table.days { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        table.days th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; color: #777; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); }
+        table.days td { padding: 0.4rem 0.5rem; border-bottom: 1px solid #f0ebe5; }
+        table.days .num { text-align: right; white-space: nowrap; }
+        table.days tr.clickable { cursor: pointer; }
+        table.days tr.clickable:hover { background: #fdf8f3; }
+        table.days tr.clickable:focus-visible { outline: 2px solid var(--secondary); outline-offset: -2px; }
+
+        /* Lunch stops and their details */
+        .lunch-item { border-radius: 6px; }
+        .lunch-item.open { background: #fffaf5; outline: 1px solid var(--secondary); }
+        button.lunch { width: 100%; background: none; color: inherit; border: 0; font: inherit; text-align: left; padding: 0.35rem 0.5rem; border-radius: 6px; cursor: pointer; }
+        button.lunch:hover { background: #fbeee0; }
+        .stop-card { padding: 0.6rem 0.8rem 0.8rem; font-size: 0.9rem; display: grid; gap: 0.3rem; }
+        .rv-stop.stop-card { margin-top: 0.5rem; border: 1px solid var(--secondary); border-radius: 6px; background: #fffaf5; }
+        .stop-head { display: flex; justify-content: space-between; gap: 0.5rem; align-items: center; }
+        .stop-card a, .linkish { color: var(--primary); }
+        .linkish { background: none; border: 0; padding: 0 0.2rem; cursor: pointer; font: inherit; text-decoration: underline; }
+        .stop-card .stop-head .linkish { text-decoration: none; font-size: 1rem; }
+        .stop-reviews blockquote { margin: 0.4rem 0 0; padding-left: 0.7rem; border-left: 3px solid #e0d2c3; }
+        .stop-reviews footer { margin-top: 0.1rem; }
+        .stop-links { display: flex; gap: 1rem; flex-wrap: wrap; }
+        .hotel-dot { font-size: 16px; line-height: 22px; text-align: center; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5)); }
+
         .empty-state { text-align: center; color: #888; padding: 3rem 1rem; background: white; border-radius: 8px; border: 1px solid var(--border); }
 
         /* ---- Route view (map / height) ---- */
@@ -496,11 +548,10 @@
         @media (max-width: 900px) {
             .mail { grid-template-columns: 1fr; height: calc(100vh - 220px); }
             .mail .pane { display: none; border-right: none; }
-            .mail[data-pane="trips"] #tripsPane,
             .mail[data-pane="stages"] #stagesPane,
             .mail[data-pane="detail"] #detailPane { display: block; }
             .back-btn { display: inline-block; }
-            #tripsPane .back-btn { display: none; }
+            .picker-menu { width: min(92vw, 420px); }
         }
     </style>
 </head>
@@ -557,10 +608,12 @@
                     </div>
                     <div class="stat-card">
                         <div class="value" id="totalDistance">-</div>
+                        <div class="sub" id="totalDistanceOfficial"></div>
                         <div class="label">Distance Walked</div>
                     </div>
                     <div class="stat-card">
                         <div class="value" id="remainingDistance">-</div>
+                        <div class="sub" id="remainingDistanceOfficial"></div>
                         <div class="label">Remaining</div>
                     </div>
                 </div>
@@ -573,18 +626,18 @@
 
                 <!-- Show / hide quotes alongside confirmed bookings -->
                 <div id="viewOptions" class="view-options hidden">
+                    <div id="tripPicker" class="picker"></div>
                     <label id="quoteToggle"><input type="checkbox" id="showQuotes"> Show quotes <span id="quoteCount" class="small"></span></label>
                     <span id="quoteHint" class="small">No quotes imported. Use Sync Data and tick "Also import quotes" to see them here.</span>
                 </div>
 
-                <!-- Itinerary: trips | stages | details -->
+                <!-- Itinerary: stages | details -->
                 <div id="itineraryTab" class="tab-content">
                     <div id="emptyState" class="empty-state hidden">
                         <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">No trips yet</p>
                         <p>Press <strong>Sync Data</strong> to import your CaminoWays bookings.</p>
                     </div>
-                    <div id="mail" class="mail hidden" data-pane="trips">
-                        <div id="tripsPane" class="pane"></div>
+                    <div id="mail" class="mail hidden" data-pane="stages">
                         <div id="stagesPane" class="pane"></div>
                         <div id="detailPane" class="pane"></div>
                     </div>
@@ -595,7 +648,7 @@
                     <div class="map-toolbar">
                         <h3 id="mapTitle"></h3>
                         <select id="mapScope" aria-label="What to show">
-                            <option value="trip">Whole trip</option>
+                            <option value="trip">Selected trips</option>
                             <option value="stage">Selected stage</option>
                         </select>
                     </div>
@@ -607,6 +660,6 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="/static/app.js?v=3"></script>
+    <script src="/static/app.js?v=4"></script>
 </body>
 </html>

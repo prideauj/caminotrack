@@ -19,12 +19,15 @@ class Stage(BaseModel):
     end_location: str
     start_hotel: str
     end_hotel: str
+    start_hotel_detour_km: Optional[float] = None  # walk from the route to the start hotel (estimated)
+    end_hotel_detour_km: Optional[float] = None    # walk from the route to the end hotel (estimated)
     start_hotel_lat: Optional[float] = None
     start_hotel_lon: Optional[float] = None
     end_hotel_lat: Optional[float] = None
     end_hotel_lon: Optional[float] = None
     standard_distance: float  # Distance from the website
-    actual_distance: float  # Calculated distance between hotels (hotel to hotel)
+    actual_distance: float  # Distance hotel to hotel where we can work it out, else the published distance
+    actual_basis: Optional[str] = None  # 'hotels' (from the hotels' positions), 'route' (between the towns on the mapped route) or None
     date_walked: date
     is_completed: bool
     route_geojson: Optional[str] = None  # GeoJSON of the walking route

@@ -37,9 +37,17 @@ The build works in small steps (one stretch between two towns at a time) and kee
 
 How the numbers are worked out:
 - **Ascent / descent**: elevation sampled every 150 m along the route (EU-DEM 25 m via OpenTopoData, Open-Meteo as fallback), lightly smoothed, ignoring wiggles under 8 m. Treat as approximate; it tends to read a little low.
+- **Distance**: *official* is what CaminoWays publishes. *Hotel to hotel* is measured along the mapped route between your hotels' map positions (read from the "Hotel On Map" links), plus the walk to and from any hotel off the route (estimated at 1.3 times the straight line). A hotel's position comes from its map link, or failing that from its address; if neither gives one, the mapped route between the towns is used.
 - **Effort**: distance + 1 km per 100 m climbed + 1 km per 300 m descended (flat-km equivalents).
 - **Difficulty**: where a stage's effort ranks among every same-length stretch of the whole route (Easy / Moderate / Hard / Very hard), plus how it compares with the trip's average day.
 - **Lunch stops**: named restaurants, cafés, bars, bakeries and shops within about 350 m of the route, nearest the middle of the stage first. OpenStreetMap data is patchy, so check opening times.
+
+## Lunch stop details
+
+Clicking a lunch stop (in the list, or its dot on a map or the height profile) looks the place up in OpenStreetMap
+for its address, phone, website, hours and cuisine, and links to Google Maps and TripAdvisor. Ratings and reviews
+need a Google Places API key: set `GOOGLE_PLACES_API_KEY` and they appear in the same card. Without it there is
+no free source of reviews, so only the links are shown.
 
 ## Hosting
 
