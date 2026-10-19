@@ -8,6 +8,13 @@ Import your CaminoWays bookings and see each walking day with its distance, clim
 - **Route data** (ascent, descent, difficulty, villages passed, lunch stops) comes from public sources: OpenStreetMap route lines and food places, and open elevation data. See `route_data.py`.
 - **Nothing is stored on the server.** Your login is used for that one request and never stored or logged. The stages are saved in your browser (`localStorage`) and the server returns them as JSON. "Clear data" removes them.
 
+## Using it
+
+- **Itinerary** (the evening before): the Today strip at the top shows where you are in the trip and opens today's stage. A stage shows the day as a timeline (villages, places to eat, the longest stretch without food), the weather and daylight (Open-Meteo), tonight's hotel with Navigate and Call, lunch stops, and a Previous / Next day control. Tap any town name for a short description and highlights.
+- **Map** (on the trail): press **Start walking** and the map follows you, shows how far you have come and what is next, warns you if you leave the route, and keeps the screen on while following. Swipe the sheet up for more.
+- **Offline**: the app can be added to the home screen. On a stage, **Save for offline** keeps the town descriptions (and, if the server has a tile provider that allows it, the map along the route), and the map keeps the areas you have already looked at, so it still works with no signal. The stages themselves are already stored in the browser.
+- **km / mi** toggle in the header. Works on phones, iPads and desktops (a bottom tab bar on phones, a map beside the detail on wide screens).
+
 ## Run locally
 
 On Windows, double-click `setup.bat` once, then `run.bat`, and open http://localhost:8000.
@@ -42,12 +49,35 @@ How the numbers are worked out:
 - **Difficulty**: where a stage's effort ranks among every same-length stretch of the whole route (Easy / Moderate / Hard / Very hard), plus how it compares with the trip's average day.
 - **Lunch stops**: named restaurants, cafés, bars, bakeries and shops within about 350 m of the route, nearest the middle of the stage first. OpenStreetMap data is patchy, so check opening times.
 
-## Lunch stop details
+## Lunch stop details and exact links
 
-Clicking a lunch stop (in the list, or its dot on a map or the height profile) looks the place up in OpenStreetMap
-for its address, phone, website, hours and cuisine, and links to Google Maps and TripAdvisor. Ratings and reviews
-need a Google Places API key: set `GOOGLE_PLACES_API_KEY` and they appear in the same card. Without it there is
-no free source of reviews, so only the links are shown.
+Clicking a lunch stop shows its address, phone, website, hours and cuisine. These come from OpenStreetMap and are
+stored in `route_data.json` (refresh them with `python route_data.py pois`), so the card never waits on a public
+map service. Links are found ahead of time by `prescan.py`:
+
+```bash
+python prescan.py links --limit 20    # try a few first; needs GOOGLE_PLACES_API_KEY
+python prescan.py status
+```
+
+A link is kept only if the place's name matches and it is within 120 m of the OpenStreetMap position (which is
+itself within 350 m of the route). With no match there is no link. Without keys the Google Maps link opens a pin at
+the place's exact coordinates. Ratings and reviews need `GOOGLE_PLACES_API_KEY`
+on the server and appear in the same card.
+
+## Town descriptions
+
+Tapping a town name shows a short description and highlights from Wikipedia. They are prescanned into
+`town_info.json` (`python towns.py build`) and checked for being the right place; towns that aren't in the file are
+looked up live.
+
+## Map tiles
+
+The map uses the free OpenStreetMap tile server (no key). Its policy forbids bulk downloading, so by default a stage can't be saved as a whole map for offline use; the app keeps only the tiles you have looked at (and its town descriptions). To allow saving whole stages, or to serve many people, set `TILE_URL` to a provider that permits it (for example MapTiler or Stadia, with your key) and `TILE_ATTRIBUTION`. A provider's free key must be set on the server, not in the page.
+
+## Keys
+
+Optional keys go in the environment, a `.env` file or `secrets.txt` (all git-ignored): `GOOGLE_PLACES_API_KEY` (see above).
 
 ## Hosting
 
@@ -67,3 +97,14 @@ route_data.py   Route profiles, difficulty, lunch stops (build + lookup)
 models.py       Stage model
 frontend/       Vanilla JS + Leaflet
 ```
+
+### Google Cloud Run
+
+`Dockerfile` is ready for Cloud Run. With the `gcloud` CLI installed and logged in (`gcloud auth login`), from this folder:
+
+```bash
+gcloud run deploy caminotrack --source . --region europe-southwest1 --allow-unauthenticated \
+    --memory 512Mi --max-instances 3
+```
+
+It scales to zero when idle, so the first request after a quiet spell takes a few seconds. Add `--min-instances 1` to keep one warm (a few dollars a month). `secrets.txt` and `.env` are never uploaded; to turn on Google reviews, add `--set-env-vars GOOGLE_PLACES_API_KEY=...`.

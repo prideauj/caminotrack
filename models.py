@@ -41,6 +41,7 @@ class Stage(BaseModel):
     difficulty_vs_trip: Optional[float] = None  # effort relative to the trip's average stage (1.0 = average)
     route_summary: Optional[str] = None  # Short written summary of the day
     lunch_stops: List[dict] = []  # Food places around mid-stage: name, kind, km from start, off-route metres
+    food_gap: Optional[dict] = None  # Longest stretch with no food place: km, and where it runs from/to (km from the start)
     places_passed: List[dict] = []  # Villages / towns passed: name, km from start
     route_path: List[List[float]] = []  # [lat, lon] points along the stage, for the map
     elevation_profile: List[List[float]] = []  # [km from start, metres] points, for the height view

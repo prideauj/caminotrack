@@ -1,0 +1,10 @@
+{
+  "hosting": {
+    "site": "caminotrack",
+    "public": "firebase_public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      { "source": "**", "run": { "serviceId": "caminotrack", "region": "europe-southwest1" } }
+    ]
+  }
+}

@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 DATA_FILE = Path(__file__).parent / "route_data.json"
 USER_AGENT = "caminotrack/0.1 (personal hiking tracker)"
 OVERPASS_URLS = [
+    "https://overpass.openstreetmap.fr/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
@@ -472,6 +473,25 @@ def overpass_query(query: str) -> list:
     raise RuntimeError(f"Overpass request failed: {last_error}")
 
 
+def place_card_fields(tags: dict) -> dict:
+    """The details of a food place worth keeping, from its OpenStreetMap tags (short keys keep the file small)"""
+    street = " ".join(p for p in (tags.get("addr:street"), tags.get("addr:housenumber")) if p)
+    town = " ".join(p for p in (tags.get("addr:postcode"), tags.get("addr:city")) if p)
+    website = tags.get("contact:website") or tags.get("website")
+    if website and not re.match(r"^https?://", website, re.I):
+        website = "http://" + website
+    fields = {
+        "addr": ", ".join(p for p in (street, town) if p),
+        "phone": tags.get("contact:phone") or tags.get("phone"),
+        "web": website[:200] if website else None,
+        "cuisine": (tags.get("cuisine") or "").replace(";", ", ").replace("_", " "),
+    }
+    return {k: v for k, v in fields.items() if v}
+
+
+LINK_FIELDS = ("gm", "checked")  # added by prescan.py; kept when the food places are refreshed
+
+
 def build_pois(route: dict) -> list:
     """Named food places and villages within walking distance of the route, with their position along it"""
     step = route["step_km"]
@@ -504,12 +524,22 @@ def build_pois(route: dict) -> list:
             if off > (PLACE_MAX_OFF_ROUTE_KM if kind == "place" else FOOD_MAX_OFF_ROUTE_KM):
                 continue
             entry = {"km": round(km, 2), "kind": kind, "name": tags["name"], "off_m": round(off * 1000),
-                     "lat": round(lat, 5), "lon": round(lon, 5)}
+                     "lat": round(lat, 5), "lon": round(lon, 5), "osm": f"{element['type'][0]}{element['id']}"}
             if tags.get("opening_hours"):
                 entry["hours"] = tags["opening_hours"][:80]
             if kind == "place":
                 entry["place"] = tags["place"]
+            else:
+                # Everything a lunch stop's card shows is kept here, so clicking a stop never needs a live lookup
+                for field, value in place_card_fields(tags).items():
+                    entry[field] = value
             found[(element["type"], element["id"])] = entry
+
+    previous = {p["osm"]: p for p in route.get("pois", []) if p.get("osm")}
+    for entry in found.values():  # keep the links a prescan already verified
+        for field in LINK_FIELDS:
+            if field in previous.get(entry["osm"], {}):
+                entry[field] = previous[entry["osm"]][field]
 
     pois = sorted(found.values(), key=lambda e: e["km"])
     logger.info(f"  {sum(e['kind'] != 'place' for e in pois)} food places, {sum(e['kind'] == 'place' for e in pois)} villages")
@@ -657,16 +687,24 @@ def places_passed(route: dict, start_km: float, end_km: float, limit: int = 10, 
     for poi in route.get("pois", []):
         if poi["kind"] == "place" and low <= poi["km"] <= high and poi.get("off_m", 0) <= max_off_m:
             places.setdefault(poi["name"], {"name": poi["name"], "km": round((poi["km"] - start_km) * direction, 1),
-                                            "type": poi.get("place", "village")})
-    chosen = sorted(places.values(), key=lambda p: PLACE_RANK.get(p["type"], 3))[:limit]
+                                            "type": poi.get("place", "village"), "lat": poi["lat"], "lon": poi["lon"]})
+    ranked = sorted(places.values(), key=lambda p: PLACE_RANK.get(p["type"], 3))
+    settlements = [p for p in ranked if p["type"] != "hamlet"]
+    # Hamlets have little to say for themselves (no article, usually no services), so they only fill in a stage
+    # that passes through hardly any towns or villages
+    chosen = (settlements if len(settlements) >= 3 else ranked)[:limit]
     return sorted(chosen, key=lambda p: p["km"])
 
 
-def longest_gap_without_food(route: dict, start_km: float, end_km: float) -> float:
+def longest_gap_without_food(route: dict, start_km: float, end_km: float) -> Tuple[float, float, float]:
+    """(length, from, to) of the longest stretch with no food place, as km from the stage start"""
     low, high = sorted((start_km, end_km))
+    direction = 1 if end_km >= start_km else -1
     stops = sorted(p["km"] for p in route.get("pois", []) if p["kind"] != "place" and low <= p["km"] <= high)
     points = [low] + stops + [high]
-    return max(b - a for a, b in zip(points, points[1:]))
+    a, b = max(zip(points, points[1:]), key=lambda pair: pair[1] - pair[0])
+    ends = sorted(((a - start_km) * direction, (b - start_km) * direction))
+    return b - a, ends[0], ends[1]
 
 
 def stage_summary(stage, route: dict, start_km: float, end_km: float, ascent: float, descent: float,
@@ -691,7 +729,7 @@ def stage_summary(stage, route: dict, start_km: float, end_km: float, ascent: fl
     if not lunches:
         parts.append("No cafés, bars or shops were found in the map data along this stage, so carry food and water.")
     else:
-        gap = longest_gap_without_food(route, start_km, end_km)
+        gap = longest_gap_without_food(route, start_km, end_km)[0]
         if gap >= 8:
             parts.append(f"There is a stretch of about {gap:.0f} km with no food or drink listed, so fill up beforehand.")
     return " ".join(parts)
@@ -794,6 +832,9 @@ def _enrich_trip(trip_stages: list, data: dict):
         stage.places_passed = places_passed(route, start_km, end_km)
         stage.route_path, stage.elevation_profile = stage_geometry(route, start_km, end_km)
         stage.lunch_stops = lunch_stops(route, start_km, end_km)
+        if route.get("pois"):
+            gap, gap_from, gap_to = longest_gap_without_food(route, start_km, end_km)
+            stage.food_gap = {"km": round(gap, 1), "from": round(gap_from, 1), "to": round(gap_to, 1)}
         stage.route_summary = stage_summary(stage, route, start_km, end_km, ascent, descent,
                                             stage.places_passed, stage.lunch_stops)
 
