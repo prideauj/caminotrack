@@ -1,6 +1,7 @@
 """Short descriptions and highlights for the towns and villages on the routes, from Wikipedia.
 
     python towns.py build [route]     # look up every town and village on the built routes (resumable)
+    python towns.py english           # make the stored file English only (drops places with no English article)
     python towns.py status
 
 The results are kept in town_info.json (committed), so the app shows them without any lookup. A town that isn't in
@@ -54,9 +55,19 @@ def title_matches(title: str, variants: List[str]) -> bool:
     return any(base == v for v in variants)
 
 
+def _get(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
+    """A GET that waits and tries again when Wikipedia asks us to slow down"""
+    for attempt in range(6):
+        response = client.get(url, headers={"User-Agent": USER_AGENT}, timeout=20, **kwargs)
+        if response.status_code != 429:
+            return response
+        time.sleep(min(float(response.headers.get("Retry-After", 0) or 0) or 2 ** attempt, 30))
+    return response
+
+
 def _api(client: httpx.Client, lang: str, params: dict) -> dict:
-    response = client.get(f"https://{lang}.wikipedia.org/w/api.php", headers={"User-Agent": USER_AGENT}, timeout=20,
-                          params={"action": "query", "format": "json", "formatversion": 2, **params})
+    response = _get(client, f"https://{lang}.wikipedia.org/w/api.php",
+                    params={"action": "query", "format": "json", "formatversion": 2, **params})
     response.raise_for_status()
     return response.json()
 
@@ -71,15 +82,36 @@ def _first_sentences(text: str, limit: int = MAX_EXTRACT_CHARS) -> str:
 
 
 def _summary(client: httpx.Client, lang: str, title: str) -> Optional[dict]:
-    response = client.get(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
-                          headers={"User-Agent": USER_AGENT}, timeout=20)
+    response = _get(client, f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}")
     if response.status_code != 200:
         return None
     return response.json()
 
 
+def english_version(client: httpx.Client, lang: str, title: str) -> Optional[dict]:
+    """The English summary of an article found in another language, when English Wikipedia has one. Its page often has
+    no map position, so the geographic search above misses it, but the local article links to it."""
+    if lang == "en":
+        return None
+    links = _api(client, lang, {"prop": "langlinks", "titles": title, "lllang": "en", "redirects": 1})
+    pages = links.get("query", {}).get("pages", [])
+    english = next((l["title"] for page in pages for l in page.get("langlinks", [])), None)
+    summary = _summary(client, "en", english) if english else None
+    if not summary or not summary.get("extract"):
+        return None
+    return {
+        "title": summary.get("title", english),
+        "lang": "en",
+        "summary": _first_sentences(summary["extract"]),
+        "what": summary.get("description"),
+        "image": (summary.get("thumbnail") or {}).get("source"),
+        "url": (summary.get("content_urls", {}).get("desktop", {}) or {}).get("page"),
+    }
+
+
 def lookup_town(client: httpx.Client, name: str, lat: float, lon: float, country: str = "") -> Optional[dict]:
-    """The Wikipedia article for this town, or None if there isn't a confident match nearby"""
+    """The English Wikipedia article for this town, or None if there isn't a confident match nearby. The app is English
+    only, so an article in another language counts only if English Wikipedia has a version of it."""
     variants = name_variants(name)
     languages = ["en"] + [l for code in country.split(",") for l in LANGUAGES.get(code, [])[1:] if l]
     languages = list(dict.fromkeys(languages))
@@ -90,20 +122,65 @@ def lookup_town(client: httpx.Client, name: str, lat: float, lon: float, country
         if not matches:
             continue
         best = min(matches, key=lambda g: g["dist"])
-        summary = _summary(client, lang, best["title"])
-        if not summary or not summary.get("extract"):
-            continue
-        return {
-            "title": summary.get("title", best["title"]),
-            "lang": lang,
-            "summary": _first_sentences(summary["extract"]),
-            "what": summary.get("description"),
-            "image": (summary.get("thumbnail") or {}).get("source"),
-            "url": (summary.get("content_urls", {}).get("desktop", {}) or {}).get("page"),
-            "away_km": round(best["dist"] / 1000, 1),
-            "highlights": all_highlights(client, [lang] + [l for l in languages if l != lang], best["title"], lat, lon),
-        }
+        if lang == "en":
+            summary = _summary(client, lang, best["title"])
+            if not summary or not summary.get("extract"):
+                continue
+            entry = {
+                "title": summary.get("title", best["title"]),
+                "lang": "en",
+                "summary": _first_sentences(summary["extract"]),
+                "what": summary.get("description"),
+                "image": (summary.get("thumbnail") or {}).get("source"),
+                "url": (summary.get("content_urls", {}).get("desktop", {}) or {}).get("page"),
+            }
+        else:
+            entry = english_version(client, lang, best["title"])
+            if not entry:
+                continue
+        entry["away_km"] = round(best["dist"] / 1000, 1)
+        entry["highlights"] = all_highlights(client, languages, best["title"], lat, lon)
+        return entry
     return None
+
+
+def english_highlights(client: httpx.Client, lang: str, found: List[dict]) -> List[dict]:
+    """The highlights that English Wikipedia also has an article for, with the English title, text and link.
+    Other languages' articles are dropped: the app is English only."""
+    if lang == "en" or not found:
+        return found
+    english = {}
+    for start in range(0, len(found), 50):
+        batch = [h["title"] for h in found[start:start + 50]]
+        data = _api(client, lang, {"prop": "langlinks", "titles": "|".join(batch), "lllang": "en", "redirects": 1,
+                                   "lllimit": "max"}).get("query", {})
+        redirected = {r["from"]: r["to"] for r in data.get("redirects", [])}
+        links = {p["title"]: l["title"] for p in data.get("pages", []) for l in p.get("langlinks", [])}
+        for title in batch:
+            if links.get(redirected.get(title, title)):
+                english[title] = links[redirected.get(title, title)]
+    if not english:
+        return []
+    pages = {}
+    wanted = sorted(set(english.values()))
+    for start in range(0, len(wanted), 20):
+        data = _api(client, "en", {"prop": "description|extracts|info", "titles": "|".join(wanted[start:start + 20]),
+                                   "redirects": 1, "exintro": 1, "explaintext": 1, "exsentences": 1, "exlimit": "max",
+                                   "inprop": "url"}).get("query", {})
+        redirected = {r["from"]: r["to"] for r in data.get("redirects", [])}
+        for page in data.get("pages", []):
+            pages[page["title"]] = page
+        for source, target in redirected.items():
+            if target in pages:
+                pages[source] = pages[target]
+    result = []
+    for h in found:
+        page = pages.get(english.get(h["title"]))
+        if not page or not page.get("description") or SKIP_HIGHLIGHT.search(page["description"]):
+            continue
+        result.append({**h, "title": page["title"], "what": page["description"][:80],
+                       "text": _first_sentences(page.get("extract", ""), 200), "url": page.get("fullurl") or h["url"]})
+    return result
 
 
 def highlights(client: httpx.Client, lang: str, own_title: str, lat: float, lon: float) -> List[dict]:
@@ -122,7 +199,7 @@ def highlights(client: httpx.Client, lang: str, own_title: str, lat: float, lon:
         found.append({"title": page["title"], "what": page["description"][:80], "away_m": round(away, -1),
                       "text": _first_sentences(page.get("extract", ""), 200),
                       "url": f"https://{lang}.wikipedia.org/wiki/{page['title'].replace(' ', '_')}"})
-    return sorted(found, key=lambda h: h["away_m"])[:MAX_HIGHLIGHTS]
+    return english_highlights(client, lang, sorted(found, key=lambda h: h["away_m"]))[:MAX_HIGHLIGHTS]
 
 
 def all_highlights(client: httpx.Client, languages: List[str], own_title: str, lat: float, lon: float) -> List[dict]:
@@ -185,6 +262,44 @@ def town_info(name: str, lat: Optional[float], lon: Optional[float], country: st
     return {"name": name, "found": True, "lat": lat, "lon": lon, **entry}
 
 
+def upgrade_to_english():
+    """Make every stored entry English only: a town with no English article loses its entry (it stops being a link),
+    and highlights without an English article are dropped"""
+    info = json.loads(INFO_FILE.read_text(encoding="utf-8"))
+    dropped_towns = dropped_highlights = 0
+    with httpx.Client() as client:
+        for entries in info.values():
+            for index, entry in enumerate(entries):
+                if entry.get("none"):
+                    continue
+                try:
+                    if entry.get("lang") != "en":
+                        english = english_version(client, entry["lang"], entry["title"])
+                        if not english:
+                            entries[index] = {"lat": entry["lat"], "lon": entry["lon"], "name": entry["name"], "none": True}
+                            dropped_towns += 1
+                            logger.info(f"  {entry['name']}: no English article")
+                            continue
+                        entry.update(english)
+                    by_lang = {}
+                    for h in entry.get("highlights", []):
+                        by_lang.setdefault(h["url"].split("//")[1].split(".")[0], []).append(h)
+                    kept = []
+                    for lang, items in by_lang.items():
+                        converted = english_highlights(client, lang, items)
+                        dropped_highlights += len(items) - len(converted)
+                        kept += converted
+                    seen = set()
+                    entry["highlights"] = [h for h in sorted(kept, key=lambda h: h["away_m"])
+                                           if not (normalise(h["title"]) in seen or seen.add(normalise(h["title"])))
+                                           and normalise(h["title"]) != normalise(entry["title"])]
+                except Exception as e:
+                    logger.warning(f"{entry['name']}: {e}")
+                time.sleep(0.3)
+    write_atomic(INFO_FILE, json.dumps(info, ensure_ascii=False, separators=(",", ":")))
+    logger.info(f"{dropped_towns} towns and {dropped_highlights} highlights had no English article and were dropped")
+
+
 def build(route_keys: List[str]):
     data = load_data()
     info = json.loads(INFO_FILE.read_text(encoding="utf-8")) if INFO_FILE.exists() else {}
@@ -218,6 +333,8 @@ if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "build":
         build(sys.argv[2:] or list(load_data()["routes"]))
+    elif command == "english":
+        upgrade_to_english()
     elif command == "status":
         entries = [e for group in _load().values() for e in group]
         print(f"{len(entries)} towns; {sum(1 for e in entries if not e.get('none'))} with a Wikipedia article")
