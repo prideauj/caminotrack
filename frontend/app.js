@@ -780,7 +780,7 @@ function reportUrl(title, body) {
 function linkifyTowns(text, stage) {
     const [from, to] = pathEnds(stage);
     const known = new Map();
-    (stage.places_passed || []).forEach(p => known.set(escapeHtml(p.name), [p.name, p.lat != null ? [p.lat, p.lon] : null]));
+    (stage.places_passed || []).filter(p => p.info !== false).forEach(p => known.set(escapeHtml(p.name), [p.name, p.lat != null ? [p.lat, p.lon] : null]));
     known.set(escapeHtml(stage.start_location), [stage.start_location, from]);
     known.set(escapeHtml(stage.end_location), [stage.end_location, to]);
     const names = [...known.keys()].sort((a, b) => b.length - a.length).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -801,7 +801,7 @@ function timelineHtml(stage) {
 
     (stage.places_passed || []).forEach(place => {
         if (place.km < 0.4 || place.km > total - 0.4) return;
-        rows.push({ km: place.km, order: 1, cls: '', name: `🏘 ${townLink(place.name, place.lat != null ? [place.lat, place.lon] : null)}`,
+        rows.push({ km: place.km, order: 1, cls: '', name: `🏘 ${place.info === false ? escapeHtml(place.name) : townLink(place.name, place.lat != null ? [place.lat, place.lon] : null)}`,
                     sub: place.type === 'hamlet' ? 'Hamlet' : '' });
     });
 

@@ -191,8 +191,8 @@ def build(route_keys: List[str]):
     with httpx.Client() as client:
         for route_key in route_keys:
             route = data["routes"][route_key]
-            towns = [p for p in route["pois"] if p["kind"] == "place" and p.get("place") in ("city", "town", "village")]
-            logger.info(f"{route_key}: {len(towns)} towns and villages")
+            towns = [p for p in route["pois"] if p["kind"] == "place" and p.get("place") in ("city", "town", "village", "hamlet")]
+            logger.info(f"{route_key}: {len(towns)} towns, villages and hamlets")
             for number, town in enumerate(towns, 1):
                 variants = name_variants(town["name"])
                 have = info.get(variants[0], []) if variants else []

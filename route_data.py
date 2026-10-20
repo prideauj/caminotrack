@@ -678,6 +678,13 @@ def lunch_stops(route: dict, start_km: float, end_km: float, limit: int = 5) -> 
 PLACE_RANK = {"city": 0, "town": 1, "village": 2, "hamlet": 3}
 
 
+def _has_town_info(name: str, lat: float, lon: float) -> bool:
+    """Whether a prescanned Wikipedia article exists for this place, so the app only links places with something to show"""
+    from towns import stored_town  # towns imports this module
+    entry = stored_town(name, lat, lon)
+    return bool(entry and not entry.get("none"))
+
+
 def places_passed(route: dict, start_km: float, end_km: float, limit: int = 10, max_off_m: int = 500) -> List[dict]:
     """The most significant villages / towns along the stage, in walking order (km from the stage start).
     OpenStreetMap lists every hamlet, so keep towns and villages first and cap the list."""
@@ -687,7 +694,8 @@ def places_passed(route: dict, start_km: float, end_km: float, limit: int = 10, 
     for poi in route.get("pois", []):
         if poi["kind"] == "place" and low <= poi["km"] <= high and poi.get("off_m", 0) <= max_off_m:
             places.setdefault(poi["name"], {"name": poi["name"], "km": round((poi["km"] - start_km) * direction, 1),
-                                            "type": poi.get("place", "village"), "lat": poi["lat"], "lon": poi["lon"]})
+                                            "type": poi.get("place", "village"), "lat": poi["lat"], "lon": poi["lon"],
+                                            "info": _has_town_info(poi["name"], poi["lat"], poi["lon"])})
     ranked = sorted(places.values(), key=lambda p: PLACE_RANK.get(p["type"], 3))
     settlements = [p for p in ranked if p["type"] != "hamlet"]
     # Hamlets have little to say for themselves (no article, usually no services), so they only fill in a stage

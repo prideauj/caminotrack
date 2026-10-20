@@ -171,7 +171,7 @@ function walkRender() {
     if (stage) {
         const items = [];
         (stage.places_passed || []).filter(p => p.type !== 'hamlet' && p.km > here + 0.05)
-            .forEach(p => items.push({ km: p.km, html: `🏘 ${townLink(p.name, p.lat != null ? [p.lat, p.lon] : null)}` }));
+            .forEach(p => items.push({ km: p.km, html: `🏘 ${p.info === false ? escapeHtml(p.name) : townLink(p.name, p.lat != null ? [p.lat, p.lon] : null)}` }));
         (stage.lunch_stops || []).filter(s => s.km > here + 0.05)
             .forEach(s => items.push({ km: s.km, html: `${FOOD_ICONS[s.kind] || '🍴'} ${s.lat != null ? `<button type="button" class="tl-stop" data-stop="${stopKey(s)}">${escapeHtml(s.name)}</button>` : escapeHtml(s.name)}` }));
         items.sort((a, b) => a.km - b.km);

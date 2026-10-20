@@ -89,7 +89,7 @@ async function saveStageOffline(stage) {
         // Town descriptions along the stage, so the town sheet works too (the service worker keeps each answer)
         const [from, to] = pathEnds(stage);
         const towns = [[stage.start_location, from], [stage.end_location, to],
-                       ...(stage.places_passed || []).filter(p => p.type !== 'hamlet').map(p => [p.name, p.lat != null ? [p.lat, p.lon] : null])];
+                       ...(stage.places_passed || []).filter(p => p.type !== 'hamlet' && p.info !== false).map(p => [p.name, p.lat != null ? [p.lat, p.lon] : null])];
         for (const [name, point] of towns.slice(0, 14)) {
             const params = new URLSearchParams({ name });
             if (point) { params.set('lat', point[0]); params.set('lon', point[1]); }
